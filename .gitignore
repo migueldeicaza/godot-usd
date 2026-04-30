@@ -1,0 +1,7 @@
+.sconsign.dblite
+compile_commands.json
+src/*.os
+project/.godot/
+project/bin/
+project/*.uid
+project/*.import
