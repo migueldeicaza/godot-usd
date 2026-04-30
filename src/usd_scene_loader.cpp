@@ -3,6 +3,7 @@
 #include "usd_light_proxy.h"
 #include "usd_materials.h"
 #include "usd_mesh_builder.h"
+#include "usd_skel.h"
 #include "usd_stage_utils.h"
 #include "usd_usdz.h"
 
@@ -22,6 +23,7 @@
 #include <godot_cpp/classes/packed_scene.hpp>
 #include <godot_cpp/classes/project_settings.hpp>
 #include <godot_cpp/classes/resource_loader.hpp>
+#include <godot_cpp/classes/skeleton3d.hpp>
 #include <godot_cpp/classes/spot_light3d.hpp>
 #include <godot_cpp/classes/texture2d.hpp>
 #include <godot_cpp/classes/world_environment.hpp>
@@ -53,6 +55,8 @@
 #include <pxr/usd/usdLux/shapingAPI.h>
 #include <pxr/usd/usdLux/sphereLight.h>
 #include <pxr/usd/usdShade/shader.h>
+#include <pxr/usd/usdSkel/animation.h>
+#include <pxr/usd/usdSkel/skeleton.h>
 
 using namespace godot;
 using namespace pxr;
@@ -181,12 +185,12 @@ class UsdSceneBuilder {
 		}
 	}
 
-	bool should_skip_child_prim(const UsdPrim &p_prim) const {
-		if (p_prim.IsA<UsdGeomSubset>() || p_prim.IsA<UsdShadeMaterial>() || p_prim.IsA<UsdShadeShader>()) {
-			return true;
+		bool should_skip_child_prim(const UsdPrim &p_prim) const {
+			if (p_prim.IsA<UsdGeomSubset>() || p_prim.IsA<UsdShadeMaterial>() || p_prim.IsA<UsdShadeShader>() || p_prim.IsA<UsdSkelAnimation>()) {
+				return true;
+			}
+			return false;
 		}
-		return false;
-	}
 
 	bool stage_has_authored_lights() const {
 		for (const UsdPrim &prim : stage->Traverse()) {
@@ -479,6 +483,17 @@ class UsdSceneBuilder {
 				}
 			}
 			node = basis_root;
+		} else if (p_prim.IsA<UsdSkelSkeleton>()) {
+			Dictionary mapping_notes;
+			Skeleton3D *skeleton = build_skeleton_node(stage, time, get_stage_correction_transform(), p_prim, &mapping_notes);
+			Array mapping_note_keys = mapping_notes.keys();
+			for (int i = 0; i < mapping_note_keys.size(); i++) {
+				const Variant key = mapping_note_keys[i];
+				if (key.get_type() == Variant::STRING || key.get_type() == Variant::STRING_NAME) {
+					set_usd_metadata(skeleton, String(key), mapping_notes[key]);
+				}
+			}
+			node = skeleton;
 		} else if (p_prim.IsA<UsdGeomXformable>() || p_prim.IsA<UsdGeomImageable>()) {
 			node = memnew(Node3D);
 		} else {
@@ -542,6 +557,8 @@ public:
 					: "No authored UsdLux lights were found on the USD stage.";
 			append_preview_lighting(root, preview_reason);
 		}
+
+		append_baked_skeleton_animations(stage, time, root);
 
 		return root;
 	}

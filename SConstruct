@@ -34,6 +34,7 @@ env.AppendUnique(
         "usd_usdUtils",
         "usd_usdLux",
         "usd_usdShade",
+        "usd_usdSkel",
         "usd_usdGeom",
         "usd_usd",
         "usd_sdf",
