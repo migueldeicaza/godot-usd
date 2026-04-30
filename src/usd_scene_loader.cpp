@@ -57,6 +57,7 @@
 #include <pxr/usd/usdLux/sphereLight.h>
 #include <pxr/usd/usdShade/shader.h>
 #include <pxr/usd/usdSkel/animation.h>
+#include <pxr/usd/usdSkel/blendShape.h>
 #include <pxr/usd/usdSkel/skeleton.h>
 
 using namespace godot;
@@ -187,7 +188,7 @@ class UsdSceneBuilder {
 	}
 
 		bool should_skip_child_prim(const UsdPrim &p_prim) const {
-			if (p_prim.IsA<UsdGeomSubset>() || p_prim.IsA<UsdShadeMaterial>() || p_prim.IsA<UsdShadeShader>() || p_prim.IsA<UsdSkelAnimation>()) {
+			if (p_prim.IsA<UsdGeomSubset>() || p_prim.IsA<UsdShadeMaterial>() || p_prim.IsA<UsdShadeShader>() || p_prim.IsA<UsdSkelAnimation>() || p_prim.IsA<UsdSkelBlendShape>()) {
 				return true;
 			}
 			return false;
