@@ -8,11 +8,15 @@
 #include "usd_usdz.h"
 
 #include <cstring>
+#include <unordered_map>
 
 #include <godot_cpp/classes/base_material3d.hpp>
+#include <godot_cpp/classes/box_mesh.hpp>
 #include <godot_cpp/classes/camera3d.hpp>
+#include <godot_cpp/classes/capsule_mesh.hpp>
 #include <godot_cpp/classes/dir_access.hpp>
 #include <godot_cpp/classes/directional_light3d.hpp>
+#include <godot_cpp/classes/cylinder_mesh.hpp>
 #include <godot_cpp/classes/environment.hpp>
 #include <godot_cpp/classes/file_access.hpp>
 #include <godot_cpp/classes/global_constants.hpp>
@@ -20,11 +24,15 @@
 #include <godot_cpp/classes/class_db_singleton.hpp>
 #include <godot_cpp/classes/light3d.hpp>
 #include <godot_cpp/classes/mesh_instance3d.hpp>
+#include <godot_cpp/classes/node.hpp>
+#include <godot_cpp/classes/node3d.hpp>
 #include <godot_cpp/classes/omni_light3d.hpp>
 #include <godot_cpp/classes/packed_scene.hpp>
+#include <godot_cpp/classes/plane_mesh.hpp>
 #include <godot_cpp/classes/project_settings.hpp>
 #include <godot_cpp/classes/resource_loader.hpp>
 #include <godot_cpp/classes/skeleton3d.hpp>
+#include <godot_cpp/classes/sphere_mesh.hpp>
 #include <godot_cpp/classes/spot_light3d.hpp>
 #include <godot_cpp/classes/texture2d.hpp>
 #include <godot_cpp/classes/world_environment.hpp>
@@ -39,16 +47,29 @@
 #include <godot_cpp/variant/packed_string_array.hpp>
 #include <godot_cpp/variant/utility_functions.hpp>
 
+#include <pxr/base/gf/quatf.h>
+#include <pxr/base/gf/vec3d.h>
+#include <pxr/base/gf/vec3f.h>
+#include <pxr/base/tf/stringUtils.h>
 #include <pxr/base/tf/token.h>
+#include <pxr/usd/sdf/path.h>
+#include <pxr/usd/usd/stage.h>
 #include <pxr/usd/usd/prim.h>
 #include <pxr/usd/usd/primRange.h>
 #include <pxr/usd/usdGeom/basisCurves.h>
 #include <pxr/usd/usdGeom/camera.h>
+#include <pxr/usd/usdGeom/capsule.h>
+#include <pxr/usd/usdGeom/cone.h>
+#include <pxr/usd/usdGeom/cube.h>
+#include <pxr/usd/usdGeom/cylinder.h>
 #include <pxr/usd/usdGeom/imageable.h>
 #include <pxr/usd/usdGeom/mesh.h>
 #include <pxr/usd/usdGeom/metrics.h>
+#include <pxr/usd/usdGeom/plane.h>
 #include <pxr/usd/usdGeom/points.h>
+#include <pxr/usd/usdGeom/sphere.h>
 #include <pxr/usd/usdGeom/tokens.h>
+#include <pxr/usd/usdGeom/xform.h>
 #include <pxr/usd/usdGeom/xformable.h>
 #include <pxr/usd/usdLux/cylinderLight.h>
 #include <pxr/usd/usdLux/diskLight.h>
@@ -99,6 +120,227 @@ String preview_lighting_mode_to_string(UsdPreviewLightingMode p_mode) {
 		default:
 			return "when_missing";
 	}
+}
+
+String make_valid_prim_identifier(const String &p_name) {
+	std::string valid = TfMakeValidIdentifier(p_name.is_empty() ? "Node" : p_name.utf8().get_data());
+	if (valid.empty()) {
+		valid = "Node";
+	}
+	return to_godot_string(valid);
+}
+
+TfToken make_valid_prim_token(const String &p_name) {
+	return TfToken(make_valid_prim_identifier(p_name).utf8().get_data());
+}
+
+void apply_transform_components(const Vector3 &p_origin, const Quaternion &p_rotation, const Vector3 &p_scale, bool p_visible, UsdGeomXformable p_xformable) {
+	if (!p_xformable) {
+		return;
+	}
+	p_xformable.ClearXformOpOrder();
+	p_xformable.AddTranslateOp(UsdGeomXformOp::PrecisionDouble).Set(GfVec3d(p_origin.x, p_origin.y, p_origin.z));
+	p_xformable.AddOrientOp(UsdGeomXformOp::PrecisionFloat).Set(GfQuatf(p_rotation.w, GfVec3f(p_rotation.x, p_rotation.y, p_rotation.z)));
+	p_xformable.AddScaleOp(UsdGeomXformOp::PrecisionFloat).Set(GfVec3f(p_scale.x, p_scale.y, p_scale.z));
+
+	UsdGeomImageable imageable(p_xformable.GetPrim());
+	if (imageable && !p_visible) {
+		imageable.MakeInvisible();
+	}
+}
+
+void apply_node3d_transform(const Node3D *p_node, UsdGeomXformable p_xformable) {
+	ERR_FAIL_NULL(p_node);
+	const Transform3D transform = p_node->get_transform();
+	apply_transform_components(transform.origin, transform.basis.get_rotation_quaternion(), transform.basis.get_scale(), p_node->is_visible(), p_xformable);
+}
+
+bool export_node_children_to_stage(Node *p_node, const SdfPath &p_parent_path, const UsdStageRefPtr &p_stage);
+
+bool export_mesh_instance_to_stage(MeshInstance3D *p_mesh_instance, const SdfPath &p_prim_path, const UsdStageRefPtr &p_stage) {
+	ERR_FAIL_NULL_V(p_mesh_instance, false);
+	ERR_FAIL_COND_V(p_stage == nullptr, false);
+
+	Ref<Mesh> mesh = p_mesh_instance->get_mesh();
+	if (mesh.is_null()) {
+		UsdGeomXform xform = UsdGeomXform::Define(p_stage, p_prim_path);
+		apply_node3d_transform(p_mesh_instance, xform);
+		export_node_children_to_stage(p_mesh_instance, p_prim_path, p_stage);
+		return true;
+	}
+
+	Ref<BoxMesh> box_mesh = mesh;
+	if (box_mesh.is_valid()) {
+		const Vector3 size = box_mesh->get_size();
+		UsdGeomCube cube = UsdGeomCube::Define(p_stage, p_prim_path);
+		cube.GetSizeAttr().Set(1.0);
+		const Transform3D transform = p_mesh_instance->get_transform();
+		const Vector3 combined_scale = transform.basis.get_scale() * size;
+		apply_transform_components(transform.origin, transform.basis.get_rotation_quaternion(), combined_scale, p_mesh_instance->is_visible(), cube);
+		export_node_children_to_stage(p_mesh_instance, p_prim_path, p_stage);
+		return true;
+	}
+
+	Ref<SphereMesh> sphere_mesh = mesh;
+	if (sphere_mesh.is_valid()) {
+		UsdGeomSphere sphere = UsdGeomSphere::Define(p_stage, p_prim_path);
+		sphere.GetRadiusAttr().Set((double)sphere_mesh->get_radius());
+		apply_node3d_transform(p_mesh_instance, sphere);
+		export_node_children_to_stage(p_mesh_instance, p_prim_path, p_stage);
+		return true;
+	}
+
+	Ref<CapsuleMesh> capsule_mesh = mesh;
+	if (capsule_mesh.is_valid()) {
+		UsdGeomCapsule capsule = UsdGeomCapsule::Define(p_stage, p_prim_path);
+		capsule.GetRadiusAttr().Set((double)capsule_mesh->get_radius());
+		capsule.GetHeightAttr().Set((double)capsule_mesh->get_height());
+		capsule.GetAxisAttr().Set(UsdGeomTokens->y);
+		apply_node3d_transform(p_mesh_instance, capsule);
+		export_node_children_to_stage(p_mesh_instance, p_prim_path, p_stage);
+		return true;
+	}
+
+	Ref<CylinderMesh> cylinder_mesh = mesh;
+	if (cylinder_mesh.is_valid()) {
+		const float top_radius = cylinder_mesh->get_top_radius();
+		const float bottom_radius = cylinder_mesh->get_bottom_radius();
+		if (Math::is_equal_approx(top_radius, 0.0f)) {
+			UsdGeomCone cone = UsdGeomCone::Define(p_stage, p_prim_path);
+			cone.GetRadiusAttr().Set((double)bottom_radius);
+			cone.GetHeightAttr().Set((double)cylinder_mesh->get_height());
+			cone.GetAxisAttr().Set(UsdGeomTokens->y);
+			apply_node3d_transform(p_mesh_instance, cone);
+			export_node_children_to_stage(p_mesh_instance, p_prim_path, p_stage);
+			return true;
+		}
+		if (Math::is_equal_approx(top_radius, bottom_radius)) {
+			UsdGeomCylinder cylinder = UsdGeomCylinder::Define(p_stage, p_prim_path);
+			cylinder.GetRadiusAttr().Set((double)top_radius);
+			cylinder.GetHeightAttr().Set((double)cylinder_mesh->get_height());
+			cylinder.GetAxisAttr().Set(UsdGeomTokens->y);
+			apply_node3d_transform(p_mesh_instance, cylinder);
+			export_node_children_to_stage(p_mesh_instance, p_prim_path, p_stage);
+			return true;
+		}
+	}
+
+	Ref<PlaneMesh> plane_mesh = mesh;
+	if (plane_mesh.is_valid()) {
+		const Vector2 size = plane_mesh->get_size();
+		UsdGeomPlane plane = UsdGeomPlane::Define(p_stage, p_prim_path);
+		plane.GetWidthAttr().Set((double)size.x);
+		plane.GetLengthAttr().Set((double)size.y);
+		plane.GetAxisAttr().Set(UsdGeomTokens->y);
+		apply_node3d_transform(p_mesh_instance, plane);
+		export_node_children_to_stage(p_mesh_instance, p_prim_path, p_stage);
+		return true;
+	}
+
+	UsdGeomXform fallback_xform = UsdGeomXform::Define(p_stage, p_prim_path);
+	apply_node3d_transform(p_mesh_instance, fallback_xform);
+	set_usd_metadata(p_mesh_instance, "usd:save_status", "Unsupported Mesh resource type for baseline saver; exported transform hierarchy only.");
+	export_node_children_to_stage(p_mesh_instance, p_prim_path, p_stage);
+	return true;
+}
+
+bool export_node_to_stage(Node *p_node, const SdfPath &p_prim_path, const UsdStageRefPtr &p_stage) {
+	ERR_FAIL_NULL_V(p_node, false);
+	ERR_FAIL_COND_V(p_stage == nullptr, false);
+
+	if (MeshInstance3D *mesh_instance = Object::cast_to<MeshInstance3D>(p_node)) {
+		return export_mesh_instance_to_stage(mesh_instance, p_prim_path, p_stage);
+	}
+
+	if (Node3D *node_3d = Object::cast_to<Node3D>(p_node)) {
+		UsdGeomXform xform = UsdGeomXform::Define(p_stage, p_prim_path);
+		apply_node3d_transform(node_3d, xform);
+		export_node_children_to_stage(p_node, p_prim_path, p_stage);
+		return true;
+	}
+
+	return false;
+}
+
+bool export_node_children_to_stage(Node *p_node, const SdfPath &p_parent_path, const UsdStageRefPtr &p_stage) {
+	ERR_FAIL_NULL_V(p_node, false);
+	ERR_FAIL_COND_V(p_stage == nullptr, false);
+
+	std::unordered_map<std::string, int> name_counts;
+	bool exported_any_child = false;
+	for (int i = 0; i < p_node->get_child_count(); i++) {
+		Node *child = p_node->get_child(i);
+		const String base_name = make_valid_prim_identifier(child->get_name());
+		const std::string base_key = base_name.utf8().get_data();
+		int &name_count = name_counts[base_key];
+		const String prim_name = name_count == 0 ? base_name : vformat("%s_%d", base_name, name_count);
+		name_count++;
+
+		const SdfPath child_path = p_parent_path.AppendChild(make_valid_prim_token(prim_name));
+		if (export_node_to_stage(child, child_path, p_stage)) {
+			exported_any_child = true;
+		}
+	}
+	return exported_any_child;
+}
+
+Error save_authored_packed_scene_to_stage(const Ref<PackedScene> &p_packed_scene, const String &p_path) {
+	ERR_FAIL_COND_V(p_packed_scene.is_null(), ERR_INVALID_PARAMETER);
+
+	Node *root = p_packed_scene->instantiate();
+	ERR_FAIL_NULL_V(root, ERR_CANT_CREATE);
+
+	const String absolute_path = get_absolute_path(p_path);
+	const String extension = p_path.get_extension().to_lower();
+	if (extension == "usdz") {
+		memdelete(root);
+		UtilityFunctions::push_error("UsdSceneFormatSaver baseline authored-scene export does not support USDZ yet.");
+		return ERR_UNAVAILABLE;
+	}
+
+	const String base_dir = absolute_path.get_base_dir();
+	if (!base_dir.is_empty()) {
+		const Error mkdir_error = DirAccess::make_dir_recursive_absolute(base_dir);
+		if (mkdir_error != OK) {
+			memdelete(root);
+			return mkdir_error;
+		}
+	}
+
+	UsdStageRefPtr stage = UsdStage::CreateNew(absolute_path.utf8().get_data());
+	if (!stage) {
+		memdelete(root);
+		return ERR_CANT_CREATE;
+	}
+
+	UsdGeomSetStageUpAxis(stage, UsdGeomTokens->y);
+	UsdGeomSetStageMetersPerUnit(stage, 1.0);
+
+	String root_name_source = String(root->get_name());
+	if (root_name_source.is_empty()) {
+		root_name_source = "Root";
+	}
+	const String root_name = make_valid_prim_identifier(root_name_source);
+	const SdfPath root_path("/" + std::string(root_name.utf8().get_data()));
+	if (!export_node_to_stage(root, root_path, stage)) {
+		UsdGeomXform root_xform = UsdGeomXform::Define(stage, root_path);
+		if (Node3D *root_node_3d = Object::cast_to<Node3D>(root)) {
+			apply_node3d_transform(root_node_3d, root_xform);
+		}
+		if (!export_node_children_to_stage(root, root_path, stage)) {
+			memdelete(root);
+			return ERR_CANT_CREATE;
+		}
+	}
+
+	UsdPrim default_prim = stage->GetPrimAtPath(root_path);
+	if (default_prim) {
+		stage->SetDefaultPrim(default_prim);
+	}
+
+	const bool saved = stage->GetRootLayer()->Save();
+	memdelete(root);
+	return saved ? OK : ERR_CANT_CREATE;
 }
 
 class UsdSceneBuilder {
@@ -725,13 +967,10 @@ void UsdStageInstance::_append_generated_summary(Node *p_node, PackedStringArray
 		return;
 	}
 
-	const Variant metadata_variant = p_node->get_meta(StringName("usd"), Variant());
-	if (metadata_variant.get_type() == Variant::DICTIONARY) {
-		const Dictionary metadata = metadata_variant;
-		const String prim_path = metadata.get("usd:prim_path", String());
-		if (!prim_path.is_empty()) {
-			r_summary->push_back(prim_path);
-		}
+	const Dictionary metadata = get_usd_metadata(p_node);
+	const String prim_path = metadata.get("usd:prim_path", String());
+	if (!prim_path.is_empty()) {
+		r_summary->push_back(prim_path);
 	}
 
 	for (int i = 0; i < p_node->get_child_count() && r_summary->size() < p_limit; i++) {
@@ -753,11 +992,7 @@ String UsdStageInstance::_get_generated_summary() const {
 
 String UsdStageInstance::_get_prim_path_for_node(const Node *p_node) const {
 	ERR_FAIL_NULL_V(p_node, String());
-	const Variant metadata_variant = p_node->get_meta(StringName("usd"), Variant());
-	if (metadata_variant.get_type() != Variant::DICTIONARY) {
-		return String();
-	}
-	const Dictionary metadata = metadata_variant;
+	const Dictionary metadata = get_usd_metadata(p_node);
 	return metadata.get("usd:prim_path", String());
 }
 
@@ -1110,7 +1345,6 @@ Variant UsdSceneFormatLoader::_load(const String &p_path, const String &p_origin
 }
 
 Error UsdSceneFormatSaver::_save(const Ref<Resource> &p_resource, const String &p_path, uint32_t p_flags) {
-	(void)p_path;
 	(void)p_flags;
 
 	if (!_recognize(p_resource)) {
@@ -1126,8 +1360,7 @@ Error UsdSceneFormatSaver::_save(const Ref<Resource> &p_resource, const String &
 	UsdStageInstance *stage_instance = Object::cast_to<UsdStageInstance>(root);
 	if (stage_instance == nullptr) {
 		memdelete(root);
-		UtilityFunctions::push_error("UsdSceneFormatSaver currently only supports PackedScene resources produced by the USD loader.");
-		return ERR_UNAVAILABLE;
+		return save_authored_packed_scene_to_stage(packed_scene, p_path);
 	}
 
 	Ref<UsdStageResource> stage_resource = stage_instance->get_stage();

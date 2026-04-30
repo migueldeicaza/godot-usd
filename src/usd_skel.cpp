@@ -64,12 +64,9 @@ Quaternion gf_quat_to_godot(const GfQuatf &p_quat) {
 
 Node *find_node_for_prim_path(Node *p_node, const String &p_prim_path) {
 	ERR_FAIL_NULL_V(p_node, nullptr);
-	const Variant metadata_variant = p_node->get_meta(StringName("usd"), Variant());
-	if (metadata_variant.get_type() == Variant::DICTIONARY) {
-		const Dictionary metadata = metadata_variant;
-		if ((String)metadata.get("usd:prim_path", String()) == p_prim_path) {
-			return p_node;
-		}
+	const Dictionary metadata = get_usd_metadata(p_node);
+	if ((String)metadata.get("usd:prim_path", String()) == p_prim_path) {
+		return p_node;
 	}
 
 	for (int i = 0; i < p_node->get_child_count(); i++) {

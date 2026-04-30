@@ -137,6 +137,9 @@ Transform3D gf_matrix_to_transform(const GfMatrix4d &p_matrix) {
 }
 
 Dictionary get_usd_metadata(const Object *p_object) {
+	if (p_object == nullptr || !p_object->has_meta(StringName(USD_META_KEY))) {
+		return Dictionary();
+	}
 	const Variant metadata = p_object->get_meta(StringName(USD_META_KEY), Dictionary());
 	if (metadata.get_type() == Variant::DICTIONARY) {
 		return metadata;
