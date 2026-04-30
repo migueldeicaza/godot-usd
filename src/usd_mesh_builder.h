@@ -20,9 +20,11 @@ struct MeshBuildResult {
 	Ref<ArrayMesh> mesh;
 	Array material_paths;
 	Array material_subsets;
+	bool has_skinning = false;
 };
 
 MeshBuildResult build_polygon_mesh(const UsdStageRefPtr &p_stage, const UsdTimeCode &p_time, const UsdGeomMesh &p_mesh, Dictionary *r_mapping_notes = nullptr);
+Node *build_points_instance(const UsdStageRefPtr &p_stage, const UsdTimeCode &p_time, const UsdPrim &p_prim, Dictionary *r_mapping_notes = nullptr);
 Node *build_primitive_mesh_instance(const UsdTimeCode &p_time, const UsdPrim &p_prim);
 
 } // namespace godot_usd

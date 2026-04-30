@@ -46,6 +46,7 @@
 #include <pxr/usd/usdGeom/imageable.h>
 #include <pxr/usd/usdGeom/mesh.h>
 #include <pxr/usd/usdGeom/metrics.h>
+#include <pxr/usd/usdGeom/points.h>
 #include <pxr/usd/usdGeom/tokens.h>
 #include <pxr/usd/usdGeom/xformable.h>
 #include <pxr/usd/usdLux/cylinderLight.h>
@@ -355,6 +356,20 @@ class UsdSceneBuilder {
 				}
 			}
 			node = mesh_instance;
+		} else if (p_prim.IsA<UsdGeomPoints>()) {
+			Dictionary mapping_notes;
+			Node *points_node = build_points_instance(stage, time, p_prim, &mapping_notes);
+			if (points_node == nullptr) {
+				return nullptr;
+			}
+			Array mapping_note_keys = mapping_notes.keys();
+			for (int i = 0; i < mapping_note_keys.size(); i++) {
+				const Variant key = mapping_note_keys[i];
+				if (key.get_type() == Variant::STRING || key.get_type() == Variant::STRING_NAME) {
+					set_usd_metadata(points_node, String(key), mapping_notes[key]);
+				}
+			}
+			node = points_node;
 		} else if (Node *primitive = build_primitive_mesh_instance(time, p_prim)) {
 			node = primitive;
 		} else if (p_prim.IsA<UsdGeomCamera>()) {
@@ -558,6 +573,7 @@ public:
 			append_preview_lighting(root, preview_reason);
 		}
 
+		append_skin_bindings(root);
 		append_baked_skeleton_animations(stage, time, root);
 
 		return root;
