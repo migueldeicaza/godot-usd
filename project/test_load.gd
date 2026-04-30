@@ -36,6 +36,7 @@ func _run_test() -> void:
     if root.get_child_count() > 0:
         generated = root.get_child(0)
         print("Generated root: %s (%s), children=%d" % [generated.name, generated.get_class(), generated.get_child_count()])
+        _print_generated_tree(generated)
         mesh_instance = _find_first_mesh_instance(generated)
         if mesh_instance != null and mesh_instance.mesh != null and mesh_instance.mesh.get_surface_count() > 0:
             material = mesh_instance.mesh.surface_get_material(0)
@@ -72,3 +73,24 @@ func _find_first_mesh_instance(node: Node) -> MeshInstance3D:
         if found != null:
             return found
     return null
+
+func _print_generated_tree(node: Node, depth: int = 0) -> void:
+    for child in node.get_children():
+        var indent := "  ".repeat(depth)
+        print("%sGenerated child: %s (%s)" % [indent, child.name, child.get_class()])
+        if child.get_class() == "AreaLight3D" or child.get_class() == "UsdAreaLightProxy":
+            print("%sArea size: %s" % [indent, child.call("get_area_size")])
+            print("%sHas area texture: %s" % [indent, child.call("get_area_texture") != null])
+            if child.has_method("get_light_shape"):
+                print("%sLight shape: %s" % [indent, child.call("get_light_shape")])
+            if child.has_method("get_source_schema"):
+                print("%sSource schema: %s" % [indent, child.call("get_source_schema")])
+        elif child is SpotLight3D:
+            print("%sSpot angle: %s" % [indent, (child as SpotLight3D).get_param(Light3D.PARAM_SPOT_ANGLE)])
+        elif child is Path3D and (child as Path3D).curve != null:
+            var path := child as Path3D
+            print("%sCurve points: %d" % [indent, path.curve.point_count])
+            print("%sCurve closed: %s" % [indent, path.curve.closed])
+        if child.has_meta("usd"):
+            print("%sNode USD meta: %s" % [indent, child.get_meta("usd")])
+        _print_generated_tree(child, depth + 1)

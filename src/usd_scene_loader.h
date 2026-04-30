@@ -11,6 +11,8 @@
 #include <godot_cpp/variant/string.hpp>
 #include <godot_cpp/variant/variant.hpp>
 
+#include "usd_light_proxy.h"
+
 using namespace godot;
 
 class UsdStageResource : public Resource {

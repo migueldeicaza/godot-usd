@@ -1,4 +1,6 @@
 #include "usd_scene_loader.h"
+#include "usd_curves.h"
+#include "usd_light_proxy.h"
 #include "usd_materials.h"
 #include "usd_mesh_builder.h"
 #include "usd_stage_utils.h"
@@ -12,13 +14,17 @@
 #include <godot_cpp/classes/file_access.hpp>
 #include <godot_cpp/classes/global_constants.hpp>
 #include <godot_cpp/classes/json.hpp>
+#include <godot_cpp/classes/class_db_singleton.hpp>
+#include <godot_cpp/classes/light3d.hpp>
 #include <godot_cpp/classes/mesh_instance3d.hpp>
 #include <godot_cpp/classes/omni_light3d.hpp>
 #include <godot_cpp/classes/packed_scene.hpp>
 #include <godot_cpp/classes/resource_loader.hpp>
+#include <godot_cpp/classes/spot_light3d.hpp>
 #include <godot_cpp/classes/texture2d.hpp>
 #include <godot_cpp/core/class_db.hpp>
 #include <godot_cpp/core/error_macros.hpp>
+#include <godot_cpp/core/math.hpp>
 #include <godot_cpp/core/memory.hpp>
 #include <godot_cpp/core/property_info.hpp>
 #include <godot_cpp/templates/list.hpp>
@@ -29,13 +35,18 @@
 
 #include <pxr/base/tf/token.h>
 #include <pxr/usd/usd/prim.h>
+#include <pxr/usd/usdGeom/basisCurves.h>
 #include <pxr/usd/usdGeom/camera.h>
 #include <pxr/usd/usdGeom/imageable.h>
 #include <pxr/usd/usdGeom/mesh.h>
 #include <pxr/usd/usdGeom/metrics.h>
 #include <pxr/usd/usdGeom/tokens.h>
 #include <pxr/usd/usdGeom/xformable.h>
+#include <pxr/usd/usdLux/cylinderLight.h>
+#include <pxr/usd/usdLux/diskLight.h>
 #include <pxr/usd/usdLux/distantLight.h>
+#include <pxr/usd/usdLux/rectLight.h>
+#include <pxr/usd/usdLux/shapingAPI.h>
 #include <pxr/usd/usdLux/sphereLight.h>
 #include <pxr/usd/usdShade/shader.h>
 
@@ -126,6 +137,101 @@ class UsdSceneBuilder {
 		return false;
 	}
 
+	template <typename TLight>
+	void apply_light_attributes(const TLight &p_light, Light3D *p_target) const {
+		ERR_FAIL_NULL(p_target);
+
+		GfVec3f color_value(1.0f);
+		float intensity = 1.0f;
+		float exposure = 0.0f;
+
+		p_light.GetColorAttr().Get(&color_value, time);
+		p_light.GetIntensityAttr().Get(&intensity, time);
+		p_light.GetExposureAttr().Get(&exposure, time);
+
+		p_target->set_color(Color(color_value[0], color_value[1], color_value[2], 1.0f));
+		p_target->set_param(Light3D::PARAM_INTENSITY, intensity * Math::pow(2.0f, exposure));
+	}
+
+	bool apply_shaping_to_spot_light(const UsdPrim &p_prim, SpotLight3D *p_target) const {
+		ERR_FAIL_NULL_V(p_target, false);
+		if (!p_prim.HasAPI<UsdLuxShapingAPI>()) {
+			return false;
+		}
+
+		UsdLuxShapingAPI shaping_api(p_prim);
+		if (!shaping_api) {
+			return false;
+		}
+
+		float cone_angle = 90.0f;
+		shaping_api.GetShapingConeAngleAttr().Get(&cone_angle, time);
+		p_target->set_param(Light3D::PARAM_SPOT_ANGLE, CLAMP(cone_angle, 0.1f, 90.0f));
+
+		float cone_softness = 0.0f;
+		shaping_api.GetShapingConeSoftnessAttr().Get(&cone_softness, time);
+		p_target->set_param(Light3D::PARAM_SPOT_ATTENUATION, MAX(0.01f, 1.0f - CLAMP(cone_softness, 0.0f, 1.0f)));
+		return true;
+	}
+
+	Node *build_area_light3d_dynamic(const Vector2 &p_area_size, const Ref<Texture2D> &p_area_texture, float p_range, const Color &p_color, float p_intensity, const Dictionary &p_mapping_notes = Dictionary()) const {
+		ClassDBSingleton *class_db = ClassDBSingleton::get_singleton();
+		if (class_db == nullptr || !class_db->class_exists(StringName("AreaLight3D")) || !class_db->can_instantiate(StringName("AreaLight3D"))) {
+			return nullptr;
+		}
+
+		Object *area_object = class_db->instantiate(StringName("AreaLight3D"));
+		if (area_object == nullptr) {
+			return nullptr;
+		}
+
+		Node *node = Object::cast_to<Node>(area_object);
+		Light3D *light = Object::cast_to<Light3D>(area_object);
+		if (node == nullptr || light == nullptr) {
+			memdelete(area_object);
+			return nullptr;
+		}
+
+		light->set_color(p_color);
+		light->set_param(Light3D::PARAM_INTENSITY, p_intensity);
+		light->set_param(Light3D::PARAM_RANGE, p_range);
+		area_object->call(StringName("set_area_size"), p_area_size);
+		if (p_area_texture.is_valid()) {
+			area_object->call(StringName("set_area_texture"), p_area_texture);
+		}
+
+		Array mapping_keys = p_mapping_notes.keys();
+		for (int i = 0; i < mapping_keys.size(); i++) {
+			const Variant key = mapping_keys[i];
+			if (key.get_type() == Variant::STRING || key.get_type() == Variant::STRING_NAME) {
+				set_usd_metadata(area_object, String(key), p_mapping_notes[key]);
+			}
+		}
+
+		return node;
+	}
+
+	UsdAreaLightProxy *build_area_light_proxy(const String &p_source_schema, const String &p_shape, const Vector2 &p_area_size, const Ref<Texture2D> &p_area_texture, float p_range, const Color &p_color, float p_intensity, const Dictionary &p_mapping_notes = Dictionary()) const {
+		UsdAreaLightProxy *proxy = memnew(UsdAreaLightProxy);
+		proxy->set_source_schema(p_source_schema);
+		proxy->set_light_shape(p_shape);
+		proxy->set_area_size(p_area_size);
+		proxy->set_area_texture(p_area_texture);
+		proxy->set_light_color(p_color);
+		proxy->set_light_intensity(p_intensity);
+		proxy->set_light_range(p_range);
+
+		Array mapping_keys = p_mapping_notes.keys();
+		for (int i = 0; i < mapping_keys.size(); i++) {
+			const Variant key = mapping_keys[i];
+			if (key.get_type() == Variant::STRING || key.get_type() == Variant::STRING_NAME) {
+				set_usd_metadata(proxy, String(key), p_mapping_notes[key]);
+			}
+		}
+
+		return proxy;
+	}
+
 	Node *build_node(const UsdPrim &p_prim) const {
 		Node *node = nullptr;
 
@@ -175,26 +281,109 @@ class UsdSceneBuilder {
 		} else if (p_prim.IsA<UsdLuxDistantLight>()) {
 			DirectionalLight3D *light = memnew(DirectionalLight3D);
 			UsdLuxDistantLight usd_light(p_prim);
-			GfVec3f color(1.0f, 1.0f, 1.0f);
-			double intensity = 1.0;
-			usd_light.GetColorAttr().Get(&color, time);
-			usd_light.GetIntensityAttr().Get(&intensity, time);
-			light->set_color(Color(color[0], color[1], color[2], 1.0f));
-			light->set_param(Light3D::PARAM_INTENSITY, (float)intensity);
+			apply_light_attributes(usd_light, light);
 			node = light;
 		} else if (p_prim.IsA<UsdLuxSphereLight>()) {
-			OmniLight3D *light = memnew(OmniLight3D);
 			UsdLuxSphereLight usd_light(p_prim);
-			GfVec3f color(1.0f, 1.0f, 1.0f);
-			double intensity = 1.0;
-			double radius = 1.0;
-			usd_light.GetColorAttr().Get(&color, time);
-			usd_light.GetIntensityAttr().Get(&intensity, time);
+			float radius = 1.0f;
 			usd_light.GetRadiusAttr().Get(&radius, time);
-			light->set_color(Color(color[0], color[1], color[2], 1.0f));
-			light->set_param(Light3D::PARAM_INTENSITY, (float)intensity);
-			light->set_param(Light3D::PARAM_SIZE, (float)radius);
-			node = light;
+
+			SpotLight3D *spot_light = memnew(SpotLight3D);
+			if (apply_shaping_to_spot_light(p_prim, spot_light)) {
+				apply_light_attributes(usd_light, spot_light);
+				spot_light->set_param(Light3D::PARAM_SIZE, radius);
+				spot_light->set_param(Light3D::PARAM_RANGE, MAX(radius * 20.0f, 1.0f));
+				set_usd_metadata(spot_light, "usd:light_mapping", "UsdLuxSphereLight with ShapingAPI was approximated as SpotLight3D.");
+				node = spot_light;
+			} else {
+				memdelete(spot_light);
+				OmniLight3D *light = memnew(OmniLight3D);
+				apply_light_attributes(usd_light, light);
+				light->set_param(Light3D::PARAM_SIZE, radius);
+				light->set_param(Light3D::PARAM_RANGE, MAX(radius * 10.0f, 1.0f));
+				node = light;
+			}
+		} else if (p_prim.IsA<UsdLuxRectLight>()) {
+			UsdLuxRectLight rect_light(p_prim);
+			GfVec3f color(1.0f, 1.0f, 1.0f);
+			float intensity = 1.0f;
+			float exposure = 0.0f;
+			float width = 1.0f;
+			float height = 1.0f;
+			rect_light.GetColorAttr().Get(&color, time);
+			rect_light.GetIntensityAttr().Get(&intensity, time);
+			rect_light.GetExposureAttr().Get(&exposure, time);
+			rect_light.GetWidthAttr().Get(&width, time);
+			rect_light.GetHeightAttr().Get(&height, time);
+
+			Ref<Texture2D> area_texture = load_texture_from_asset_attribute(stage, time, rect_light.GetTextureFileAttr());
+			const Color light_color(color[0], color[1], color[2], 1.0f);
+			const float light_intensity = intensity * Math::pow(2.0f, exposure);
+			Dictionary mapping_notes;
+			if (area_texture.is_valid()) {
+				mapping_notes["usd:rect_light_has_texture"] = true;
+			}
+
+			node = build_area_light3d_dynamic(Vector2(width, height), area_texture, MAX(MAX(width, height) * 10.0f, 1.0f), light_color, light_intensity, mapping_notes);
+			if (node == nullptr) {
+				mapping_notes["usd:light_mapping"] = "UsdLuxRectLight was mapped to UsdAreaLightProxy because AreaLight3D is unavailable in this runtime.";
+				node = build_area_light_proxy("UsdLuxRectLight", "rect", Vector2(width, height), area_texture, MAX(MAX(width, height) * 10.0f, 1.0f), light_color, light_intensity, mapping_notes);
+			}
+		} else if (p_prim.IsA<UsdLuxDiskLight>()) {
+			UsdLuxDiskLight disk_light(p_prim);
+			GfVec3f color(1.0f, 1.0f, 1.0f);
+			float intensity = 1.0f;
+			float exposure = 0.0f;
+			float radius = 0.5f;
+			disk_light.GetColorAttr().Get(&color, time);
+			disk_light.GetIntensityAttr().Get(&intensity, time);
+			disk_light.GetExposureAttr().Get(&exposure, time);
+			disk_light.GetRadiusAttr().Get(&radius, time);
+
+			const Color light_color(color[0], color[1], color[2], 1.0f);
+			const float light_intensity = intensity * Math::pow(2.0f, exposure);
+			Dictionary mapping_notes;
+			mapping_notes["usd:light_mapping"] = "UsdLuxDiskLight was approximated as AreaLight3D.";
+
+			node = build_area_light3d_dynamic(Vector2(radius * 2.0f, radius * 2.0f), Ref<Texture2D>(), MAX(radius * 10.0f, 1.0f), light_color, light_intensity, mapping_notes);
+			if (node == nullptr) {
+				mapping_notes["usd:light_mapping"] = "UsdLuxDiskLight was mapped to UsdAreaLightProxy because AreaLight3D is unavailable in this runtime.";
+				node = build_area_light_proxy("UsdLuxDiskLight", "disk", Vector2(radius * 2.0f, radius * 2.0f), Ref<Texture2D>(), MAX(radius * 10.0f, 1.0f), light_color, light_intensity, mapping_notes);
+			}
+		} else if (p_prim.IsA<UsdLuxCylinderLight>()) {
+			UsdLuxCylinderLight cylinder_light(p_prim);
+			float radius = 0.5f;
+			float length = 1.0f;
+			cylinder_light.GetRadiusAttr().Get(&radius, time);
+			cylinder_light.GetLengthAttr().Get(&length, time);
+
+			SpotLight3D *spot_light = memnew(SpotLight3D);
+			if (apply_shaping_to_spot_light(p_prim, spot_light)) {
+				apply_light_attributes(cylinder_light, spot_light);
+				spot_light->set_param(Light3D::PARAM_SIZE, radius);
+				spot_light->set_param(Light3D::PARAM_RANGE, MAX(length * 10.0f, 1.0f));
+				set_usd_metadata(spot_light, "usd:light_mapping", "UsdLuxCylinderLight with ShapingAPI was approximated as SpotLight3D.");
+				node = spot_light;
+			} else {
+				memdelete(spot_light);
+				OmniLight3D *light = memnew(OmniLight3D);
+				apply_light_attributes(cylinder_light, light);
+				light->set_param(Light3D::PARAM_SIZE, radius);
+				light->set_param(Light3D::PARAM_RANGE, MAX(MAX(length, radius) * 10.0f, 1.0f));
+				set_usd_metadata(light, "usd:light_mapping", "UsdLuxCylinderLight was approximated as OmniLight3D.");
+				node = light;
+			}
+		} else if (p_prim.IsA<UsdGeomBasisCurves>()) {
+			Dictionary mapping_notes;
+			Node3D *basis_root = build_basis_curves_node(p_prim, time, &mapping_notes);
+			Array mapping_note_keys = mapping_notes.keys();
+			for (int i = 0; i < mapping_note_keys.size(); i++) {
+				const Variant key = mapping_note_keys[i];
+				if (key.get_type() == Variant::STRING || key.get_type() == Variant::STRING_NAME) {
+					set_usd_metadata(basis_root, String(key), mapping_notes[key]);
+				}
+			}
+			node = basis_root;
 		} else if (p_prim.IsA<UsdGeomXformable>() || p_prim.IsA<UsdGeomImageable>()) {
 			node = memnew(Node3D);
 		} else {

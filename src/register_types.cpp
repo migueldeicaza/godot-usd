@@ -9,6 +9,7 @@
 #include <godot_cpp/godot.hpp>
 
 #include "usd_editor_plugin.h"
+#include "usd_light_proxy.h"
 #include "usd_scene_importer.h"
 #include "usd_scene_loader.h"
 
@@ -20,6 +21,7 @@ static Ref<UsdSceneFormatSaver> s_usd_saver;
 void initialize_godot_usd_module(ModuleInitializationLevel p_level) {
 	if (p_level == MODULE_INITIALIZATION_LEVEL_SCENE) {
 		GDREGISTER_CLASS(UsdStageResource);
+		GDREGISTER_CLASS(UsdAreaLightProxy);
 		GDREGISTER_CLASS(UsdStageInstance);
 		GDREGISTER_CLASS(UsdSceneFormatLoader);
 		GDREGISTER_CLASS(UsdSceneFormatSaver);
