@@ -11,6 +11,7 @@
 #include <unordered_map>
 
 #include <godot_cpp/classes/base_material3d.hpp>
+#include <godot_cpp/classes/array_mesh.hpp>
 #include <godot_cpp/classes/box_mesh.hpp>
 #include <godot_cpp/classes/camera3d.hpp>
 #include <godot_cpp/classes/capsule_mesh.hpp>
@@ -43,8 +44,12 @@
 #include <godot_cpp/core/property_info.hpp>
 #include <godot_cpp/templates/list.hpp>
 #include <godot_cpp/variant/array.hpp>
+#include <godot_cpp/variant/packed_color_array.hpp>
+#include <godot_cpp/variant/packed_int32_array.hpp>
 #include <godot_cpp/variant/callable_method_pointer.hpp>
+#include <godot_cpp/variant/packed_vector2_array.hpp>
 #include <godot_cpp/variant/packed_string_array.hpp>
+#include <godot_cpp/variant/packed_vector3_array.hpp>
 #include <godot_cpp/variant/utility_functions.hpp>
 
 #include <pxr/base/gf/quatf.h>
@@ -62,11 +67,14 @@
 #include <pxr/usd/usdGeom/cone.h>
 #include <pxr/usd/usdGeom/cube.h>
 #include <pxr/usd/usdGeom/cylinder.h>
+#include <pxr/usd/usdGeom/gprim.h>
 #include <pxr/usd/usdGeom/imageable.h>
 #include <pxr/usd/usdGeom/mesh.h>
 #include <pxr/usd/usdGeom/metrics.h>
 #include <pxr/usd/usdGeom/plane.h>
 #include <pxr/usd/usdGeom/points.h>
+#include <pxr/usd/usdGeom/primvarsAPI.h>
+#include <pxr/usd/usdGeom/subset.h>
 #include <pxr/usd/usdGeom/sphere.h>
 #include <pxr/usd/usdGeom/tokens.h>
 #include <pxr/usd/usdGeom/xform.h>
@@ -79,6 +87,7 @@
 #include <pxr/usd/usdLux/sphereLight.h>
 #include <pxr/usd/usdShade/materialBindingAPI.h>
 #include <pxr/usd/usdShade/shader.h>
+#include <pxr/usd/usdShade/tokens.h>
 #include <pxr/usd/usdSkel/animation.h>
 #include <pxr/usd/usdSkel/blendShape.h>
 #include <pxr/usd/usdSkel/skeleton.h>
@@ -158,6 +167,242 @@ void apply_node3d_transform(const Node3D *p_node, UsdGeomXformable p_xformable) 
 
 bool export_node_children_to_stage(Node *p_node, const SdfPath &p_parent_path, const UsdStageRefPtr &p_stage, const String &p_save_path);
 
+struct UsdMeshSurfaceFaceRange {
+	int face_start = 0;
+	int face_count = 0;
+};
+
+bool write_mesh_geometry(const Ref<Mesh> &p_mesh, UsdGeomMesh p_usd_mesh, std::vector<UsdMeshSurfaceFaceRange> *r_surface_face_ranges = nullptr) {
+	ERR_FAIL_COND_V(p_mesh.is_null(), false);
+	if (!p_usd_mesh) {
+		return false;
+	}
+	Ref<ArrayMesh> array_mesh = p_mesh;
+	ERR_FAIL_COND_V(array_mesh.is_null(), false);
+
+	VtArray<GfVec3f> points;
+	VtArray<int> face_vertex_counts;
+	VtArray<int> face_vertex_indices;
+	VtArray<GfVec3f> normals;
+	VtArray<GfVec2f> uvs;
+	VtArray<GfVec3f> display_colors;
+	VtArray<float> display_opacities;
+	bool have_normals = true;
+	bool have_uvs = true;
+	bool have_colors = true;
+	bool have_opacities = true;
+
+	if (r_surface_face_ranges != nullptr) {
+		r_surface_face_ranges->clear();
+		r_surface_face_ranges->resize(p_mesh->get_surface_count());
+	}
+
+	for (int surface_index = 0; surface_index < p_mesh->get_surface_count(); surface_index++) {
+		const Array arrays = p_mesh->surface_get_arrays(surface_index);
+		if (arrays.size() != Mesh::ARRAY_MAX) {
+			continue;
+		}
+
+		const PackedVector3Array vertices = arrays[Mesh::ARRAY_VERTEX];
+		if (vertices.is_empty()) {
+			continue;
+		}
+		if (array_mesh->surface_get_primitive_type(surface_index) != Mesh::PRIMITIVE_TRIANGLES) {
+			return false;
+		}
+
+		const PackedVector3Array surface_normals = arrays[Mesh::ARRAY_NORMAL];
+		const PackedVector2Array surface_uvs = arrays[Mesh::ARRAY_TEX_UV];
+		const PackedColorArray surface_colors = arrays[Mesh::ARRAY_COLOR];
+		const PackedInt32Array indices = arrays[Mesh::ARRAY_INDEX];
+		const int vertex_offset = (int)points.size();
+		const int face_start = (int)face_vertex_counts.size();
+
+		for (int i = 0; i < vertices.size(); i++) {
+			const Vector3 vertex = vertices[i];
+			points.push_back(GfVec3f(vertex.x, vertex.y, vertex.z));
+		}
+
+		if (have_normals && surface_normals.size() == vertices.size()) {
+			for (int i = 0; i < surface_normals.size(); i++) {
+				const Vector3 normal = surface_normals[i];
+				normals.push_back(GfVec3f(normal.x, normal.y, normal.z));
+			}
+		} else {
+			have_normals = false;
+		}
+
+		if (have_uvs && surface_uvs.size() == vertices.size()) {
+			for (int i = 0; i < surface_uvs.size(); i++) {
+				const Vector2 uv = surface_uvs[i];
+				uvs.push_back(GfVec2f(uv.x, uv.y));
+			}
+		} else {
+			have_uvs = false;
+		}
+
+		if (have_colors && surface_colors.size() == vertices.size()) {
+			for (int i = 0; i < surface_colors.size(); i++) {
+				const Color color = surface_colors[i];
+				display_colors.push_back(GfVec3f(color.r, color.g, color.b));
+				display_opacities.push_back(color.a);
+			}
+		} else {
+			have_colors = false;
+			have_opacities = false;
+		}
+
+		int emitted_faces = 0;
+		if (!indices.is_empty()) {
+			for (int i = 0; i + 2 < indices.size(); i += 3) {
+				face_vertex_counts.push_back(3);
+				face_vertex_indices.push_back(vertex_offset + indices[i]);
+				face_vertex_indices.push_back(vertex_offset + indices[i + 2]);
+				face_vertex_indices.push_back(vertex_offset + indices[i + 1]);
+				emitted_faces++;
+			}
+		} else {
+			for (int i = 0; i + 2 < vertices.size(); i += 3) {
+				face_vertex_counts.push_back(3);
+				face_vertex_indices.push_back(vertex_offset + i);
+				face_vertex_indices.push_back(vertex_offset + i + 2);
+				face_vertex_indices.push_back(vertex_offset + i + 1);
+				emitted_faces++;
+			}
+		}
+
+		if (r_surface_face_ranges != nullptr) {
+			(*r_surface_face_ranges)[surface_index].face_start = face_start;
+			(*r_surface_face_ranges)[surface_index].face_count = emitted_faces;
+		}
+	}
+
+	if (points.empty() || face_vertex_counts.empty()) {
+		return false;
+	}
+
+	p_usd_mesh.CreatePointsAttr().Set(points);
+	p_usd_mesh.CreateFaceVertexCountsAttr().Set(face_vertex_counts);
+	p_usd_mesh.CreateFaceVertexIndicesAttr().Set(face_vertex_indices);
+	p_usd_mesh.CreateSubdivisionSchemeAttr().Set(UsdGeomTokens->none);
+	p_usd_mesh.CreateOrientationAttr().Set(UsdGeomTokens->rightHanded);
+
+	if (have_normals && normals.size() == points.size()) {
+		p_usd_mesh.CreateNormalsAttr().Set(normals);
+		p_usd_mesh.SetNormalsInterpolation(UsdGeomTokens->vertex);
+	}
+
+	if (have_uvs && uvs.size() == points.size()) {
+		UsdGeomPrimvarsAPI primvars_api(p_usd_mesh);
+		UsdGeomPrimvar st = primvars_api.CreatePrimvar(TfToken("st"), SdfValueTypeNames->TexCoord2fArray, UsdGeomTokens->vertex);
+		st.Set(uvs);
+	}
+
+	if (have_colors && display_colors.size() == points.size()) {
+		UsdGeomGprim gprim(p_usd_mesh);
+		gprim.CreateDisplayColorPrimvar(UsdGeomTokens->vertex).Set(display_colors);
+		if (have_opacities && display_opacities.size() == points.size()) {
+			gprim.CreateDisplayOpacityPrimvar(UsdGeomTokens->vertex).Set(display_opacities);
+		}
+	}
+
+	return true;
+}
+
+void write_mesh_material_binding(const UsdStageRefPtr &p_stage, MeshInstance3D *p_mesh_instance, const UsdGeomMesh &p_usd_mesh, const SdfPath &p_mesh_path, const String &p_save_path, const std::vector<UsdMeshSurfaceFaceRange> &p_surface_face_ranges) {
+	ERR_FAIL_NULL(p_mesh_instance);
+	if (!p_usd_mesh || p_stage == nullptr) {
+		return;
+	}
+
+	Ref<Mesh> mesh = p_mesh_instance->get_mesh();
+	if (mesh.is_null() || mesh->get_surface_count() == 0 || p_surface_face_ranges.size() != (size_t)mesh->get_surface_count()) {
+		return;
+	}
+
+	std::unordered_map<uint64_t, UsdShadeMaterial> material_cache;
+	std::unordered_map<std::string, int> material_name_counts;
+	const auto resolve_usd_material = [&](const Ref<Material> &p_material) -> UsdShadeMaterial {
+		if (p_material.is_null()) {
+			return UsdShadeMaterial();
+		}
+
+		const uint64_t material_id = p_material->get_instance_id();
+		if (material_cache.count(material_id) != 0) {
+			return material_cache[material_id];
+		}
+
+		String base_name = String(p_material->get_name());
+		if (base_name.is_empty()) {
+			base_name = "Material";
+		}
+		base_name = make_valid_prim_identifier(base_name);
+		const std::string base_key = base_name.utf8().get_data();
+		const int name_count = material_name_counts[base_key];
+		material_name_counts[base_key] = name_count + 1;
+		const String material_key = name_count == 0 ? base_name : vformat("%s_%d", base_name, name_count + 1);
+
+		UsdShadeMaterial usd_material;
+		if (write_preview_material(p_stage, p_material, p_mesh_path, p_save_path, material_key, &usd_material) && usd_material) {
+			material_cache[material_id] = usd_material;
+			return usd_material;
+		}
+		return UsdShadeMaterial();
+	};
+
+	Ref<Material> shared_material;
+	bool can_use_shared_binding = true;
+	for (int surface_index = 0; surface_index < mesh->get_surface_count(); surface_index++) {
+		if (p_surface_face_ranges[surface_index].face_count <= 0) {
+			continue;
+		}
+		const Ref<Material> surface_material = p_mesh_instance->get_active_material(surface_index);
+		if (surface_material.is_null()) {
+			can_use_shared_binding = false;
+			continue;
+		}
+		if (shared_material.is_null()) {
+			shared_material = surface_material;
+		} else if (shared_material != surface_material) {
+			can_use_shared_binding = false;
+		}
+	}
+
+	if (can_use_shared_binding && shared_material.is_valid()) {
+		const UsdShadeMaterial usd_material = resolve_usd_material(shared_material);
+		if (usd_material) {
+			UsdShadeMaterialBindingAPI::Apply(p_usd_mesh.GetPrim()).Bind(usd_material);
+		}
+		return;
+	}
+
+	UsdShadeMaterialBindingAPI::Apply(p_usd_mesh.GetPrim());
+	for (int surface_index = 0; surface_index < mesh->get_surface_count(); surface_index++) {
+		const UsdMeshSurfaceFaceRange &surface_range = p_surface_face_ranges[surface_index];
+		if (surface_range.face_count <= 0) {
+			continue;
+		}
+
+		const Ref<Material> surface_material = p_mesh_instance->get_active_material(surface_index);
+		if (surface_material.is_null()) {
+			continue;
+		}
+
+		VtIntArray subset_faces;
+		subset_faces.reserve(surface_range.face_count);
+		for (int face_index = 0; face_index < surface_range.face_count; face_index++) {
+			subset_faces.push_back(surface_range.face_start + face_index);
+		}
+
+		const String subset_name = vformat("Surface_%d", surface_index);
+		UsdGeomSubset subset = UsdGeomSubset::CreateGeomSubset(p_usd_mesh, TfToken(subset_name.utf8().get_data()), UsdGeomTokens->face, subset_faces, UsdShadeTokens->materialBind, UsdGeomTokens->nonOverlapping);
+		const UsdShadeMaterial usd_material = resolve_usd_material(surface_material);
+		if (usd_material) {
+			UsdShadeMaterialBindingAPI::Apply(subset.GetPrim()).Bind(usd_material);
+		}
+	}
+}
+
 void bind_mesh_instance_material(MeshInstance3D *p_mesh_instance, const UsdPrim &p_prim, const SdfPath &p_prim_path, const UsdStageRefPtr &p_stage, const String &p_save_path) {
 	ERR_FAIL_NULL(p_mesh_instance);
 	ERR_FAIL_COND(p_stage == nullptr);
@@ -192,6 +437,18 @@ bool export_mesh_instance_to_stage(MeshInstance3D *p_mesh_instance, const SdfPat
 		apply_node3d_transform(p_mesh_instance, xform);
 		export_node_children_to_stage(p_mesh_instance, p_prim_path, p_stage, p_save_path);
 		return true;
+	}
+
+	Ref<ArrayMesh> array_mesh = mesh;
+	if (array_mesh.is_valid()) {
+		UsdGeomMesh usd_mesh = UsdGeomMesh::Define(p_stage, p_prim_path);
+		std::vector<UsdMeshSurfaceFaceRange> surface_face_ranges;
+		if (write_mesh_geometry(array_mesh, usd_mesh, &surface_face_ranges)) {
+			apply_node3d_transform(p_mesh_instance, usd_mesh);
+			write_mesh_material_binding(p_stage, p_mesh_instance, usd_mesh, p_prim_path, p_save_path, surface_face_ranges);
+			export_node_children_to_stage(p_mesh_instance, p_prim_path, p_stage, p_save_path);
+			return true;
+		}
 	}
 
 	Ref<BoxMesh> box_mesh = mesh;
