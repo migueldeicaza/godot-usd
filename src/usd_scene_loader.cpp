@@ -11,6 +11,7 @@
 #include <godot_cpp/classes/base_material3d.hpp>
 #include <godot_cpp/classes/camera3d.hpp>
 #include <godot_cpp/classes/directional_light3d.hpp>
+#include <godot_cpp/classes/environment.hpp>
 #include <godot_cpp/classes/file_access.hpp>
 #include <godot_cpp/classes/global_constants.hpp>
 #include <godot_cpp/classes/json.hpp>
@@ -19,9 +20,11 @@
 #include <godot_cpp/classes/mesh_instance3d.hpp>
 #include <godot_cpp/classes/omni_light3d.hpp>
 #include <godot_cpp/classes/packed_scene.hpp>
+#include <godot_cpp/classes/project_settings.hpp>
 #include <godot_cpp/classes/resource_loader.hpp>
 #include <godot_cpp/classes/spot_light3d.hpp>
 #include <godot_cpp/classes/texture2d.hpp>
+#include <godot_cpp/classes/world_environment.hpp>
 #include <godot_cpp/core/class_db.hpp>
 #include <godot_cpp/core/error_macros.hpp>
 #include <godot_cpp/core/math.hpp>
@@ -35,6 +38,7 @@
 
 #include <pxr/base/tf/token.h>
 #include <pxr/usd/usd/prim.h>
+#include <pxr/usd/usd/primRange.h>
 #include <pxr/usd/usdGeom/basisCurves.h>
 #include <pxr/usd/usdGeom/camera.h>
 #include <pxr/usd/usdGeom/imageable.h>
@@ -57,6 +61,38 @@ using namespace godot_usd;
 namespace {
 
 constexpr const char *USD_STAGE_INSTANCE_GENERATED_META = "usd_stage_instance_generated";
+constexpr const char *USD_PREVIEW_LIGHTING_MODE_SETTING = "filesystem/import/usd/preview_lighting_mode";
+
+enum UsdPreviewLightingMode {
+	USD_PREVIEW_LIGHTING_NEVER = 0,
+	USD_PREVIEW_LIGHTING_WHEN_MISSING = 1,
+	USD_PREVIEW_LIGHTING_ALWAYS = 2,
+};
+
+UsdPreviewLightingMode get_preview_lighting_mode() {
+	ProjectSettings *project_settings = ProjectSettings::get_singleton();
+	const int configured_mode = project_settings != nullptr ? (int)project_settings->get_setting(USD_PREVIEW_LIGHTING_MODE_SETTING, USD_PREVIEW_LIGHTING_WHEN_MISSING) : USD_PREVIEW_LIGHTING_WHEN_MISSING;
+
+	switch (configured_mode) {
+		case USD_PREVIEW_LIGHTING_NEVER:
+			return USD_PREVIEW_LIGHTING_NEVER;
+		case USD_PREVIEW_LIGHTING_ALWAYS:
+			return USD_PREVIEW_LIGHTING_ALWAYS;
+		default:
+			return USD_PREVIEW_LIGHTING_WHEN_MISSING;
+	}
+}
+
+String preview_lighting_mode_to_string(UsdPreviewLightingMode p_mode) {
+	switch (p_mode) {
+		case USD_PREVIEW_LIGHTING_NEVER:
+			return "never";
+		case USD_PREVIEW_LIGHTING_ALWAYS:
+			return "always";
+		default:
+			return "when_missing";
+	}
+}
 
 class UsdSceneBuilder {
 	const UsdStageRefPtr stage;
@@ -113,11 +149,26 @@ class UsdSceneBuilder {
 		if (xformable) {
 			GfMatrix4d local_matrix(1.0);
 			bool resets_xform_stack = false;
-			if (xformable.GetLocalTransformation(&local_matrix, &resets_xform_stack, time)) {
-				node_3d->set_transform(gf_matrix_to_transform(local_matrix));
-				if (resets_xform_stack) {
-					set_usd_metadata(node_3d, "usd:resets_xform_stack", true);
+			const bool has_local_transform = xformable.GetLocalTransformation(&local_matrix, &resets_xform_stack, time);
+			if (resets_xform_stack) {
+				Transform3D corrected_world_transform;
+				bool has_corrected_world_transform = false;
+				UsdGeomImageable imageable(p_prim);
+				if (imageable) {
+					corrected_world_transform = get_stage_correction_transform() * gf_matrix_to_transform(imageable.ComputeLocalToWorldTransform(time));
+					has_corrected_world_transform = true;
+				} else if (has_local_transform) {
+					corrected_world_transform = get_stage_correction_transform() * gf_matrix_to_transform(local_matrix);
+					has_corrected_world_transform = true;
 				}
+
+				node_3d->set_as_top_level(true);
+				if (has_corrected_world_transform) {
+					node_3d->set_global_transform(corrected_world_transform);
+				}
+				set_usd_metadata(node_3d, "usd:resets_xform_stack", true);
+			} else if (has_local_transform) {
+				node_3d->set_transform(gf_matrix_to_transform(local_matrix));
 			}
 		}
 
@@ -135,6 +186,50 @@ class UsdSceneBuilder {
 			return true;
 		}
 		return false;
+	}
+
+	bool stage_has_authored_lights() const {
+		for (const UsdPrim &prim : stage->Traverse()) {
+			if (prim.HasAPI<UsdLuxLightAPI>()) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	void append_preview_lighting(Node3D *p_root, const String &p_reason) const {
+		ERR_FAIL_NULL(p_root);
+
+		Dictionary preview_metadata;
+		preview_metadata["usd:generated_preview"] = true;
+		preview_metadata["usd:preview_only"] = true;
+		preview_metadata["usd:generated_preview_reason"] = p_reason;
+
+		Ref<Environment> preview_environment;
+		preview_environment.instantiate();
+		preview_environment->set_background(Environment::BG_COLOR);
+		preview_environment->set_bg_color(Color(0.09f, 0.10f, 0.12f));
+		preview_environment->set_ambient_source(Environment::AMBIENT_SOURCE_COLOR);
+		preview_environment->set_ambient_light_color(Color(0.42f, 0.44f, 0.48f));
+		preview_environment->set_ambient_light_energy(0.7f);
+		preview_environment->set_ambient_light_sky_contribution(0.0f);
+
+		WorldEnvironment *world_environment = memnew(WorldEnvironment);
+		world_environment->set_name("USDPreviewEnvironment");
+		world_environment->set_environment(preview_environment);
+		set_usd_metadata_entries(world_environment, preview_metadata);
+		set_usd_metadata(world_environment, "usd:generated_preview_kind", "world_environment");
+		p_root->add_child(world_environment);
+
+		DirectionalLight3D *preview_sun = memnew(DirectionalLight3D);
+		preview_sun->set_name("USDPreviewSun");
+		preview_sun->set_rotation_degrees(Vector3(-50.0f, 30.0f, 0.0f));
+		preview_sun->set_color(Color(1.0f, 0.97f, 0.92f));
+		preview_sun->set_param(Light3D::PARAM_INTENSITY, 40000.0f);
+		preview_sun->set_shadow(true);
+		set_usd_metadata_entries(preview_sun, preview_metadata);
+		set_usd_metadata(preview_sun, "usd:generated_preview_kind", "directional_light");
+		p_root->add_child(preview_sun);
 	}
 
 	template <typename TLight>
@@ -421,7 +516,14 @@ public:
 		Node3D *root = memnew(Node3D);
 		root->set_name(p_root_name);
 		root->set_transform(get_stage_correction_transform());
-		set_usd_metadata_entries(root, collect_stage_metadata(stage));
+		Dictionary stage_metadata = collect_stage_metadata(stage);
+		const bool has_authored_lights = stage_has_authored_lights();
+		const UsdPreviewLightingMode preview_lighting_mode = get_preview_lighting_mode();
+		const bool add_preview_lighting = preview_lighting_mode == USD_PREVIEW_LIGHTING_ALWAYS || (preview_lighting_mode == USD_PREVIEW_LIGHTING_WHEN_MISSING && !has_authored_lights);
+		stage_metadata["usd:has_authored_lights"] = has_authored_lights;
+		stage_metadata["usd:preview_lighting_mode"] = preview_lighting_mode_to_string(preview_lighting_mode);
+		stage_metadata["usd:has_preview_lighting"] = add_preview_lighting;
+		set_usd_metadata_entries(root, stage_metadata);
 
 		UsdPrim pseudo_root = stage->GetPseudoRoot();
 		for (const UsdPrim &child_prim : pseudo_root.GetChildren()) {
@@ -432,6 +534,13 @@ public:
 			if (child_node != nullptr) {
 				root->add_child(child_node);
 			}
+		}
+
+		if (add_preview_lighting) {
+			const String preview_reason = preview_lighting_mode == USD_PREVIEW_LIGHTING_ALWAYS
+					? String("Synthetic preview lighting was forced by project setting '") + USD_PREVIEW_LIGHTING_MODE_SETTING + "'."
+					: "No authored UsdLux lights were found on the USD stage.";
+			append_preview_lighting(root, preview_reason);
 		}
 
 		return root;
