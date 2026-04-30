@@ -5,6 +5,8 @@
 #include <godot_cpp/core/math.hpp>
 #include <godot_cpp/variant/vector3.hpp>
 
+#include <pxr/base/tf/stringUtils.h>
+#include <pxr/usd/sdf/types.h>
 #include <pxr/usd/usdShade/material.h>
 #include <pxr/usd/usdShade/shader.h>
 
@@ -88,6 +90,19 @@ void merge_material_uv_transform(const UsdStageRefPtr &p_stage, const UsdTimeCod
 
 bool is_texture_output_channel(const TfToken &p_output_name, BaseMaterial3D::TextureChannel p_channel) {
 	return get_texture_channel_for_output(p_output_name) == p_channel;
+}
+
+String make_valid_identifier(const String &p_name) {
+	std::string valid = TfMakeValidIdentifier(p_name.is_empty() ? "Material" : p_name.utf8().get_data());
+	if (valid.empty()) {
+		valid = "Material";
+	}
+	return to_godot_string(valid);
+}
+
+float preview_f0_from_godot_specular(float p_specular) {
+	const float clamped_specular = CLAMP(p_specular, 0.0f, 1.0f);
+	return 0.16f * clamped_specular * clamped_specular;
 }
 
 } // namespace
@@ -576,6 +591,73 @@ Ref<Material> build_material_from_usd_material(const UsdStageRefPtr &p_stage, co
 	}
 
 	return material;
+}
+
+bool write_preview_material(const UsdStageRefPtr &p_stage, const Ref<Material> &p_material, const SdfPath &p_mesh_path, const String &p_material_key, UsdShadeMaterial *r_material) {
+	ERR_FAIL_NULL_V(r_material, false);
+	*r_material = UsdShadeMaterial();
+	ERR_FAIL_COND_V(p_stage == nullptr, false);
+
+	BaseMaterial3D *base_material = Object::cast_to<BaseMaterial3D>(p_material.ptr());
+	if (base_material == nullptr) {
+		return false;
+	}
+
+	const String material_name_source = p_material_key.is_empty() ? (p_material->get_name().is_empty() ? String("Material") : String(p_material->get_name())) : p_material_key;
+	const String material_name = make_valid_identifier(material_name_source);
+	const SdfPath material_path = p_mesh_path.AppendChild(TfToken("Looks")).AppendChild(TfToken(material_name.utf8().get_data()));
+
+	UsdShadeMaterial usd_material = UsdShadeMaterial::Define(p_stage, material_path);
+	UsdShadeShader preview_surface = UsdShadeShader::Define(p_stage, material_path.AppendChild(TfToken("PreviewSurface")));
+	preview_surface.CreateIdAttr(VtValue(TfToken("UsdPreviewSurface")));
+	usd_material.CreateSurfaceOutput().ConnectToSource(preview_surface.CreateOutput(TfToken("surface"), SdfValueTypeNames->Token));
+
+	const Color albedo = base_material->get_albedo();
+	const Dictionary material_metadata = get_usd_metadata(base_material);
+	const bool use_specular_workflow = (bool)material_metadata.get("usd:preview_surface_use_specular_workflow", false);
+	const Variant ior_variant = material_metadata.get("usd:preview_surface_ior", Variant());
+
+	preview_surface.CreateInput(TfToken("diffuseColor"), SdfValueTypeNames->Color3f).Set(GfVec3f(albedo.r, albedo.g, albedo.b));
+	if (!use_specular_workflow) {
+		preview_surface.CreateInput(TfToken("metallic"), SdfValueTypeNames->Float).Set(base_material->get_metallic());
+	} else {
+		preview_surface.CreateInput(TfToken("useSpecularWorkflow"), SdfValueTypeNames->Bool).Set(true);
+		if (material_metadata.has("usd:preview_surface_specular_color")) {
+			const Color specular_color = material_metadata["usd:preview_surface_specular_color"];
+			preview_surface.CreateInput(TfToken("specularColor"), SdfValueTypeNames->Color3f).Set(GfVec3f(specular_color.r, specular_color.g, specular_color.b));
+		} else {
+			const float preview_f0 = preview_f0_from_godot_specular(base_material->get_specular());
+			preview_surface.CreateInput(TfToken("specularColor"), SdfValueTypeNames->Color3f).Set(GfVec3f(preview_f0, preview_f0, preview_f0));
+		}
+	}
+	preview_surface.CreateInput(TfToken("roughness"), SdfValueTypeNames->Float).Set(base_material->get_roughness());
+	if (ior_variant.get_type() == Variant::FLOAT || ior_variant.get_type() == Variant::INT) {
+		preview_surface.CreateInput(TfToken("ior"), SdfValueTypeNames->Float).Set((float)(double)ior_variant);
+	}
+
+	const bool has_emission = base_material->get_feature(BaseMaterial3D::FEATURE_EMISSION) ||
+			base_material->get_texture(BaseMaterial3D::TEXTURE_EMISSION).is_valid() ||
+			base_material->get_emission() != Color(0.0f, 0.0f, 0.0f, 1.0f);
+	if (has_emission) {
+		const Color emission = base_material->get_emission();
+		preview_surface.CreateInput(TfToken("emissiveColor"), SdfValueTypeNames->Color3f).Set(GfVec3f(emission.r, emission.g, emission.b));
+	}
+
+	if (base_material->get_transparency() != BaseMaterial3D::TRANSPARENCY_DISABLED) {
+		preview_surface.CreateInput(TfToken("opacity"), SdfValueTypeNames->Float).Set(CLAMP(albedo.a, 0.0f, 1.0f));
+	}
+	if (base_material->get_transparency() == BaseMaterial3D::TRANSPARENCY_ALPHA_SCISSOR) {
+		preview_surface.CreateInput(TfToken("opacityThreshold"), SdfValueTypeNames->Float).Set(CLAMP(base_material->get_alpha_scissor_threshold(), 0.0f, 1.0f));
+	}
+
+	const bool has_clearcoat = base_material->get_feature(BaseMaterial3D::FEATURE_CLEARCOAT) || !Math::is_zero_approx(base_material->get_clearcoat());
+	if (has_clearcoat) {
+		preview_surface.CreateInput(TfToken("clearcoat"), SdfValueTypeNames->Float).Set(base_material->get_clearcoat());
+		preview_surface.CreateInput(TfToken("clearcoatRoughness"), SdfValueTypeNames->Float).Set(base_material->get_clearcoat_roughness());
+	}
+
+	*r_material = usd_material;
+	return true;
 }
 
 Ref<Material> make_display_color_material(const Color &p_color, bool p_use_vertex_colors) {

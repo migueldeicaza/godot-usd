@@ -77,6 +77,7 @@
 #include <pxr/usd/usdLux/rectLight.h>
 #include <pxr/usd/usdLux/shapingAPI.h>
 #include <pxr/usd/usdLux/sphereLight.h>
+#include <pxr/usd/usdShade/materialBindingAPI.h>
 #include <pxr/usd/usdShade/shader.h>
 #include <pxr/usd/usdSkel/animation.h>
 #include <pxr/usd/usdSkel/blendShape.h>
@@ -157,6 +158,30 @@ void apply_node3d_transform(const Node3D *p_node, UsdGeomXformable p_xformable) 
 
 bool export_node_children_to_stage(Node *p_node, const SdfPath &p_parent_path, const UsdStageRefPtr &p_stage);
 
+void bind_mesh_instance_material(MeshInstance3D *p_mesh_instance, const UsdPrim &p_prim, const SdfPath &p_prim_path, const UsdStageRefPtr &p_stage) {
+	ERR_FAIL_NULL(p_mesh_instance);
+	ERR_FAIL_COND(p_stage == nullptr);
+	if (!p_prim) {
+		return;
+	}
+
+	Ref<Material> material = p_mesh_instance->get_material_override();
+	if (material.is_null()) {
+		Ref<Mesh> mesh = p_mesh_instance->get_mesh();
+		if (mesh.is_valid() && mesh->get_surface_count() > 0) {
+			material = p_mesh_instance->get_active_material(0);
+		}
+	}
+	if (material.is_null()) {
+		return;
+	}
+
+	UsdShadeMaterial usd_material;
+	if (write_preview_material(p_stage, material, p_prim_path, material->get_name(), &usd_material) && usd_material) {
+		UsdShadeMaterialBindingAPI::Apply(p_prim).Bind(usd_material);
+	}
+}
+
 bool export_mesh_instance_to_stage(MeshInstance3D *p_mesh_instance, const SdfPath &p_prim_path, const UsdStageRefPtr &p_stage) {
 	ERR_FAIL_NULL_V(p_mesh_instance, false);
 	ERR_FAIL_COND_V(p_stage == nullptr, false);
@@ -177,6 +202,7 @@ bool export_mesh_instance_to_stage(MeshInstance3D *p_mesh_instance, const SdfPat
 		const Transform3D transform = p_mesh_instance->get_transform();
 		const Vector3 combined_scale = transform.basis.get_scale() * size;
 		apply_transform_components(transform.origin, transform.basis.get_rotation_quaternion(), combined_scale, p_mesh_instance->is_visible(), cube);
+		bind_mesh_instance_material(p_mesh_instance, cube.GetPrim(), p_prim_path, p_stage);
 		export_node_children_to_stage(p_mesh_instance, p_prim_path, p_stage);
 		return true;
 	}
@@ -186,6 +212,7 @@ bool export_mesh_instance_to_stage(MeshInstance3D *p_mesh_instance, const SdfPat
 		UsdGeomSphere sphere = UsdGeomSphere::Define(p_stage, p_prim_path);
 		sphere.GetRadiusAttr().Set((double)sphere_mesh->get_radius());
 		apply_node3d_transform(p_mesh_instance, sphere);
+		bind_mesh_instance_material(p_mesh_instance, sphere.GetPrim(), p_prim_path, p_stage);
 		export_node_children_to_stage(p_mesh_instance, p_prim_path, p_stage);
 		return true;
 	}
@@ -197,6 +224,7 @@ bool export_mesh_instance_to_stage(MeshInstance3D *p_mesh_instance, const SdfPat
 		capsule.GetHeightAttr().Set((double)capsule_mesh->get_height());
 		capsule.GetAxisAttr().Set(UsdGeomTokens->y);
 		apply_node3d_transform(p_mesh_instance, capsule);
+		bind_mesh_instance_material(p_mesh_instance, capsule.GetPrim(), p_prim_path, p_stage);
 		export_node_children_to_stage(p_mesh_instance, p_prim_path, p_stage);
 		return true;
 	}
@@ -211,6 +239,7 @@ bool export_mesh_instance_to_stage(MeshInstance3D *p_mesh_instance, const SdfPat
 			cone.GetHeightAttr().Set((double)cylinder_mesh->get_height());
 			cone.GetAxisAttr().Set(UsdGeomTokens->y);
 			apply_node3d_transform(p_mesh_instance, cone);
+			bind_mesh_instance_material(p_mesh_instance, cone.GetPrim(), p_prim_path, p_stage);
 			export_node_children_to_stage(p_mesh_instance, p_prim_path, p_stage);
 			return true;
 		}
@@ -220,6 +249,7 @@ bool export_mesh_instance_to_stage(MeshInstance3D *p_mesh_instance, const SdfPat
 			cylinder.GetHeightAttr().Set((double)cylinder_mesh->get_height());
 			cylinder.GetAxisAttr().Set(UsdGeomTokens->y);
 			apply_node3d_transform(p_mesh_instance, cylinder);
+			bind_mesh_instance_material(p_mesh_instance, cylinder.GetPrim(), p_prim_path, p_stage);
 			export_node_children_to_stage(p_mesh_instance, p_prim_path, p_stage);
 			return true;
 		}
@@ -233,6 +263,7 @@ bool export_mesh_instance_to_stage(MeshInstance3D *p_mesh_instance, const SdfPat
 		plane.GetLengthAttr().Set((double)size.y);
 		plane.GetAxisAttr().Set(UsdGeomTokens->y);
 		apply_node3d_transform(p_mesh_instance, plane);
+		bind_mesh_instance_material(p_mesh_instance, plane.GetPrim(), p_prim_path, p_stage);
 		export_node_children_to_stage(p_mesh_instance, p_prim_path, p_stage);
 		return true;
 	}
@@ -615,6 +646,26 @@ class UsdSceneBuilder {
 			}
 			node = points_node;
 		} else if (Node *primitive = build_primitive_mesh_instance(time, p_prim)) {
+			if (MeshInstance3D *mesh_instance = Object::cast_to<MeshInstance3D>(primitive)) {
+				Dictionary mapping_notes;
+				UsdShadeMaterial bound_material = UsdShadeMaterialBindingAPI(p_prim).ComputeBoundMaterial();
+				if (bound_material) {
+					Ref<Material> material = build_material_from_usd_material(stage, time, bound_material, &mapping_notes);
+					if (material.is_valid()) {
+						mesh_instance->set_material_override(material);
+						Array material_bindings;
+						material_bindings.push_back(to_godot_string(bound_material.GetPath().GetString()));
+						set_usd_metadata(mesh_instance, "usd:material_bindings", material_bindings);
+					}
+				}
+				Array mapping_note_keys = mapping_notes.keys();
+				for (int i = 0; i < mapping_note_keys.size(); i++) {
+					const Variant key = mapping_note_keys[i];
+					if (key.get_type() == Variant::STRING || key.get_type() == Variant::STRING_NAME) {
+						set_usd_metadata(mesh_instance, String(key), mapping_notes[key]);
+					}
+				}
+			}
 			node = primitive;
 		} else if (p_prim.IsA<UsdGeomCamera>()) {
 			Camera3D *camera = memnew(Camera3D);
