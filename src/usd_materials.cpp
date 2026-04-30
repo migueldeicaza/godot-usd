@@ -86,6 +86,10 @@ void merge_material_uv_transform(const UsdStageRefPtr &p_stage, const UsdTimeCod
 	}
 }
 
+bool is_texture_output_channel(const TfToken &p_output_name, BaseMaterial3D::TextureChannel p_channel) {
+	return get_texture_channel_for_output(p_output_name) == p_channel;
+}
+
 } // namespace
 
 UsdShaderConnection::UsdShaderConnection(const UsdShadeShader &p_shader, const TfToken &p_output_name) :
@@ -324,6 +328,8 @@ Ref<Material> build_material_from_usd_material(const UsdStageRefPtr &p_stage, co
 				material->set_texture(BaseMaterial3D::TEXTURE_ALBEDO, texture);
 				merge_material_uv_transform(p_stage, p_time, texture_connection.shader, material.ptr(), &has_uv_transform, &uv_scale, &uv_offset, r_mapping_notes);
 			}
+		} else if (diffuse_input.HasConnectedSource() && r_mapping_notes != nullptr) {
+			(*r_mapping_notes)["usd:material_status"] = vformat("Material %s uses an unsupported diffuseColor source shader.", material_path);
 		}
 	}
 
@@ -342,6 +348,8 @@ Ref<Material> build_material_from_usd_material(const UsdStageRefPtr &p_stage, co
 				material->set_metallic_texture_channel(get_texture_channel_for_output(texture_connection.output_name));
 				merge_material_uv_transform(p_stage, p_time, texture_connection.shader, material.ptr(), &has_uv_transform, &uv_scale, &uv_offset, r_mapping_notes);
 			}
+		} else if (r_mapping_notes != nullptr) {
+			(*r_mapping_notes)["usd:material_status"] = vformat("Material %s uses an unsupported metallic source shader.", material_path);
 		}
 	}
 
@@ -360,6 +368,8 @@ Ref<Material> build_material_from_usd_material(const UsdStageRefPtr &p_stage, co
 				material->set_roughness_texture_channel(get_texture_channel_for_output(texture_connection.output_name));
 				merge_material_uv_transform(p_stage, p_time, texture_connection.shader, material.ptr(), &has_uv_transform, &uv_scale, &uv_offset, r_mapping_notes);
 			}
+		} else if (r_mapping_notes != nullptr) {
+			(*r_mapping_notes)["usd:material_status"] = vformat("Material %s uses an unsupported roughness source shader.", material_path);
 		}
 	}
 
@@ -374,6 +384,8 @@ Ref<Material> build_material_from_usd_material(const UsdStageRefPtr &p_stage, co
 				material->set_texture(BaseMaterial3D::TEXTURE_NORMAL, texture);
 				merge_material_uv_transform(p_stage, p_time, texture_connection.shader, material.ptr(), &has_uv_transform, &uv_scale, &uv_offset, r_mapping_notes);
 			}
+		} else if (r_mapping_notes != nullptr) {
+			(*r_mapping_notes)["usd:material_status"] = vformat("Material %s uses an unsupported normal source shader.", material_path);
 		}
 	}
 
@@ -403,6 +415,8 @@ Ref<Material> build_material_from_usd_material(const UsdStageRefPtr &p_stage, co
 				}
 				merge_material_uv_transform(p_stage, p_time, texture_connection.shader, material.ptr(), &has_uv_transform, &uv_scale, &uv_offset, r_mapping_notes);
 			}
+		} else if (r_mapping_notes != nullptr) {
+			(*r_mapping_notes)["usd:material_status"] = vformat("Material %s uses an unsupported opacity source shader.", material_path);
 		}
 	}
 
@@ -435,6 +449,8 @@ Ref<Material> build_material_from_usd_material(const UsdStageRefPtr &p_stage, co
 				has_emission = true;
 				merge_material_uv_transform(p_stage, p_time, texture_connection.shader, material.ptr(), &has_uv_transform, &uv_scale, &uv_offset, r_mapping_notes);
 			}
+		} else if (r_mapping_notes != nullptr) {
+			(*r_mapping_notes)["usd:material_status"] = vformat("Material %s uses an unsupported emissiveColor source shader.", material_path);
 		}
 	}
 	if (has_emission) {
@@ -462,6 +478,18 @@ Ref<Material> build_material_from_usd_material(const UsdStageRefPtr &p_stage, co
 	UsdShadeInput specular_input = preview_surface.GetInput(TfToken("specularColor"));
 	bool applied_specular_override = false;
 	if (use_specular_workflow && specular_input) {
+		if (specular_input.HasConnectedSource()) {
+			const UsdShaderConnection texture_connection = get_connected_texture_shader(p_stage, p_time, specular_input);
+			if (texture_connection) {
+				record_preview_texture_source(p_stage, p_time, &texture_sources, "specularColor", texture_connection);
+				if (r_mapping_notes != nullptr) {
+					(*r_mapping_notes)["usd:material_status"] = vformat("Material %s uses specularColor texture input; it is preserved for save, but only approximated for Godot display.", material_path);
+				}
+			} else if (r_mapping_notes != nullptr) {
+				(*r_mapping_notes)["usd:material_status"] = vformat("Material %s uses an unsupported specularColor source shader.", material_path);
+			}
+		}
+
 		GfVec3f specular_color(0.04f, 0.04f, 0.04f);
 		if (specular_input.Get(&specular_color, p_time)) {
 			const Color specular_preview_color(specular_color[0], specular_color[1], specular_color[2], 1.0f);
@@ -469,43 +497,60 @@ Ref<Material> build_material_from_usd_material(const UsdStageRefPtr &p_stage, co
 			material->set_specular(godot_specular_from_preview_f0(specular_preview_color.get_luminance()));
 			applied_specular_override = true;
 		}
-
-		const UsdShaderConnection texture_connection = get_connected_texture_shader(p_stage, p_time, specular_input);
-		if (texture_connection) {
-			record_preview_texture_source(p_stage, p_time, &texture_sources, "specularColor", texture_connection);
-		}
 	}
 	if (!applied_specular_override && has_ior) {
 		material->set_specular(godot_specular_from_preview_f0(preview_surface_f0_from_ior(ior)));
 	}
 
 	float clearcoat = 0.0f;
+	bool has_clearcoat_value = false;
 	if (UsdShadeInput clearcoat_input = preview_surface.GetInput(TfToken("clearcoat"))) {
-		if (clearcoat_input.Get(&clearcoat, p_time)) {
-			material->set_feature(BaseMaterial3D::FEATURE_CLEARCOAT, true);
+		has_clearcoat_value = clearcoat_input.Get(&clearcoat, p_time);
+	}
+	float clearcoat_roughness = 0.01f;
+	bool has_clearcoat_roughness_value = false;
+	if (UsdShadeInput clearcoat_roughness_input = preview_surface.GetInput(TfToken("clearcoatRoughness"))) {
+		has_clearcoat_roughness_value = clearcoat_roughness_input.Get(&clearcoat_roughness, p_time);
+	}
+
+	UsdShadeInput clearcoat_input = preview_surface.GetInput(TfToken("clearcoat"));
+	UsdShadeInput clearcoat_roughness_input = preview_surface.GetInput(TfToken("clearcoatRoughness"));
+	const UsdShaderConnection clearcoat_texture_connection = clearcoat_input ? get_connected_texture_shader(p_stage, p_time, clearcoat_input) : UsdShaderConnection();
+	const UsdShaderConnection clearcoat_roughness_texture_connection = clearcoat_roughness_input ? get_connected_texture_shader(p_stage, p_time, clearcoat_roughness_input) : UsdShaderConnection();
+
+	const bool has_clearcoat = has_clearcoat_value || has_clearcoat_roughness_value || clearcoat_texture_connection || clearcoat_roughness_texture_connection;
+	if (has_clearcoat) {
+		material->set_feature(BaseMaterial3D::FEATURE_CLEARCOAT, true);
+		if (has_clearcoat_value) {
 			material->set_clearcoat(clearcoat);
 		}
-		const UsdShaderConnection texture_connection = get_connected_texture_shader(p_stage, p_time, clearcoat_input);
-		if (texture_connection) {
-			record_preview_texture_source(p_stage, p_time, &texture_sources, "clearcoat", texture_connection);
-			Ref<Texture2D> texture = load_texture_from_shader(p_stage, p_time, texture_connection.shader);
-			if (texture.is_valid()) {
-				material->set_feature(BaseMaterial3D::FEATURE_CLEARCOAT, true);
-				material->set_texture(BaseMaterial3D::TEXTURE_CLEARCOAT, texture);
-				merge_material_uv_transform(p_stage, p_time, texture_connection.shader, material.ptr(), &has_uv_transform, &uv_scale, &uv_offset, r_mapping_notes);
-			}
+		if (has_clearcoat_roughness_value) {
+			material->set_clearcoat_roughness(clearcoat_roughness);
 		}
 	}
 
-	float clearcoat_roughness = 0.01f;
-	if (UsdShadeInput clearcoat_roughness_input = preview_surface.GetInput(TfToken("clearcoatRoughness"))) {
-		if (clearcoat_roughness_input.Get(&clearcoat_roughness, p_time)) {
-			material->set_feature(BaseMaterial3D::FEATURE_CLEARCOAT, true);
-			material->set_clearcoat_roughness(clearcoat_roughness);
-		}
-		const UsdShaderConnection texture_connection = get_connected_texture_shader(p_stage, p_time, clearcoat_roughness_input);
-		if (texture_connection) {
-			record_preview_texture_source(p_stage, p_time, &texture_sources, "clearcoatRoughness", texture_connection);
+	if (clearcoat_texture_connection || clearcoat_roughness_texture_connection) {
+		if (clearcoat_texture_connection && clearcoat_roughness_texture_connection &&
+				clearcoat_texture_connection.shader.GetPath() == clearcoat_roughness_texture_connection.shader.GetPath() &&
+				is_texture_output_channel(clearcoat_texture_connection.output_name, BaseMaterial3D::TEXTURE_CHANNEL_RED) &&
+				is_texture_output_channel(clearcoat_roughness_texture_connection.output_name, BaseMaterial3D::TEXTURE_CHANNEL_GREEN)) {
+			record_preview_texture_source(p_stage, p_time, &texture_sources, "clearcoat", clearcoat_texture_connection);
+			record_preview_texture_source(p_stage, p_time, &texture_sources, "clearcoatRoughness", clearcoat_roughness_texture_connection);
+			Ref<Texture2D> texture = load_texture_from_shader(p_stage, p_time, clearcoat_texture_connection.shader);
+			if (texture.is_valid()) {
+				material->set_texture(BaseMaterial3D::TEXTURE_CLEARCOAT, texture);
+				merge_material_uv_transform(p_stage, p_time, clearcoat_texture_connection.shader, material.ptr(), &has_uv_transform, &uv_scale, &uv_offset, r_mapping_notes);
+			}
+		} else {
+			if (r_mapping_notes != nullptr) {
+				(*r_mapping_notes)["usd:material_status"] = vformat("Material %s uses clearcoat texture wiring that cannot be represented by StandardMaterial3D; only scalar clearcoat values were applied.", material_path);
+			}
+			if (clearcoat_texture_connection) {
+				record_preview_texture_source(p_stage, p_time, &texture_sources, "clearcoat", clearcoat_texture_connection);
+			}
+			if (clearcoat_roughness_texture_connection) {
+				record_preview_texture_source(p_stage, p_time, &texture_sources, "clearcoatRoughness", clearcoat_roughness_texture_connection);
+			}
 		}
 	}
 
@@ -521,6 +566,8 @@ Ref<Material> build_material_from_usd_material(const UsdStageRefPtr &p_stage, co
 				material->set_ao_texture_channel(get_texture_channel_for_output(texture_connection.output_name));
 				merge_material_uv_transform(p_stage, p_time, texture_connection.shader, material.ptr(), &has_uv_transform, &uv_scale, &uv_offset, r_mapping_notes);
 			}
+		} else if (r_mapping_notes != nullptr) {
+			(*r_mapping_notes)["usd:material_status"] = vformat("Material %s uses an unsupported occlusion source shader.", material_path);
 		}
 	}
 

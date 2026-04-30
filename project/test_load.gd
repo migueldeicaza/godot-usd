@@ -44,8 +44,12 @@ func _run_test() -> void:
                 if material is BaseMaterial3D:
                     var base_material := material as BaseMaterial3D
                     print("Has albedo texture: %s" % [base_material.get_texture(BaseMaterial3D.TEXTURE_ALBEDO) != null])
+                    print("Has clearcoat texture: %s" % [base_material.get_texture(BaseMaterial3D.TEXTURE_CLEARCOAT) != null])
+                    print("Has AO texture: %s" % [base_material.get_texture(BaseMaterial3D.TEXTURE_AMBIENT_OCCLUSION) != null])
                     print("UV1 scale: %s" % [base_material.uv1_scale])
                     print("UV1 offset: %s" % [base_material.uv1_offset])
+        if mesh_instance != null and mesh_instance.has_meta("usd"):
+            print("Mesh USD meta: %s" % [mesh_instance.get_meta("usd")])
 
     material = null
     mesh_instance = null
