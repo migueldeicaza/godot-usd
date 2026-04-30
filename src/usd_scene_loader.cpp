@@ -11,6 +11,7 @@
 
 #include <godot_cpp/classes/base_material3d.hpp>
 #include <godot_cpp/classes/camera3d.hpp>
+#include <godot_cpp/classes/dir_access.hpp>
 #include <godot_cpp/classes/directional_light3d.hpp>
 #include <godot_cpp/classes/environment.hpp>
 #include <godot_cpp/classes/file_access.hpp>
@@ -1109,11 +1110,52 @@ Variant UsdSceneFormatLoader::_load(const String &p_path, const String &p_origin
 }
 
 Error UsdSceneFormatSaver::_save(const Ref<Resource> &p_resource, const String &p_path, uint32_t p_flags) {
-	(void)p_resource;
 	(void)p_path;
 	(void)p_flags;
-	UtilityFunctions::push_error("UsdSceneFormatSaver is not implemented yet in the GDExtension port.");
-	return ERR_UNAVAILABLE;
+
+	if (!_recognize(p_resource)) {
+		return ERR_INVALID_PARAMETER;
+	}
+
+	Ref<PackedScene> packed_scene = p_resource;
+	ERR_FAIL_COND_V(packed_scene.is_null(), ERR_INVALID_PARAMETER);
+
+	Node *root = packed_scene->instantiate();
+	ERR_FAIL_NULL_V(root, ERR_CANT_CREATE);
+
+	UsdStageInstance *stage_instance = Object::cast_to<UsdStageInstance>(root);
+	if (stage_instance == nullptr) {
+		memdelete(root);
+		UtilityFunctions::push_error("UsdSceneFormatSaver currently only supports PackedScene resources produced by the USD loader.");
+		return ERR_UNAVAILABLE;
+	}
+
+	Ref<UsdStageResource> stage_resource = stage_instance->get_stage();
+	if (stage_resource.is_null() || stage_resource->get_source_path().is_empty()) {
+		memdelete(root);
+		UtilityFunctions::push_error("UsdSceneFormatSaver requires a USD-backed stage resource with a source path.");
+		return ERR_UNAVAILABLE;
+	}
+
+	UsdStageRefPtr stage_ptr = open_stage_for_instance(stage_resource->get_source_path(), stage_instance->get_variant_selections());
+	if (!stage_ptr) {
+		memdelete(root);
+		return ERR_CANT_OPEN;
+	}
+
+	const String absolute_path = get_absolute_path(p_path);
+	const String base_dir = absolute_path.get_base_dir();
+	if (!base_dir.is_empty()) {
+		const Error mkdir_error = DirAccess::make_dir_recursive_absolute(base_dir);
+		if (mkdir_error != OK) {
+			memdelete(root);
+			return mkdir_error;
+		}
+	}
+
+	const bool exported = stage_ptr->Export(absolute_path.utf8().get_data(), true);
+	memdelete(root);
+	return exported ? OK : ERR_CANT_CREATE;
 }
 
 bool UsdSceneFormatSaver::_recognize(const Ref<Resource> &p_resource) const {
