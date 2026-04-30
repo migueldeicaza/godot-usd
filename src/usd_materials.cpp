@@ -1,5 +1,6 @@
 #include "usd_materials.h"
 
+#include <godot_cpp/classes/dir_access.hpp>
 #include <godot_cpp/classes/standard_material3d.hpp>
 #include <godot_cpp/core/error_macros.hpp>
 #include <godot_cpp/core/math.hpp>
@@ -103,6 +104,159 @@ String make_valid_identifier(const String &p_name) {
 float preview_f0_from_godot_specular(float p_specular) {
 	const float clamped_specular = CLAMP(p_specular, 0.0f, 1.0f);
 	return 0.16f * clamped_specular * clamped_specular;
+}
+
+Dictionary get_preview_surface_texture_sources(const Object *p_object) {
+	if (p_object == nullptr) {
+		return Dictionary();
+	}
+	return get_usd_metadata(p_object).get("usd:preview_surface_texture_sources", Dictionary());
+}
+
+Dictionary get_preview_surface_texture_source(const Object *p_object, const String &p_input_name) {
+	const Dictionary texture_sources = get_preview_surface_texture_sources(p_object);
+	if (!texture_sources.has(p_input_name)) {
+		return Dictionary();
+	}
+	const Variant source = texture_sources[p_input_name];
+	return source.get_type() == Variant::DICTIONARY ? (Dictionary)source : Dictionary();
+}
+
+TfToken get_usd_texture_output_for_name(const String &p_output_name) {
+	if (p_output_name == "r" || p_output_name == "red") {
+		return TfToken("r");
+	}
+	if (p_output_name == "g" || p_output_name == "green") {
+		return TfToken("g");
+	}
+	if (p_output_name == "b" || p_output_name == "blue") {
+		return TfToken("b");
+	}
+	if (p_output_name == "a" || p_output_name == "alpha") {
+		return TfToken("a");
+	}
+	return TfToken("rgb");
+}
+
+SdfValueTypeName get_usd_output_type_for_name(const String &p_output_name) {
+	return get_usd_texture_output_for_name(p_output_name) == TfToken("rgb") ? SdfValueTypeNames->Float3 : SdfValueTypeNames->Float;
+}
+
+TfToken get_usd_texture_output_for_channel(BaseMaterial3D::TextureChannel p_channel) {
+	switch (p_channel) {
+		case BaseMaterial3D::TEXTURE_CHANNEL_RED:
+			return TfToken("r");
+		case BaseMaterial3D::TEXTURE_CHANNEL_GREEN:
+			return TfToken("g");
+		case BaseMaterial3D::TEXTURE_CHANNEL_BLUE:
+			return TfToken("b");
+		case BaseMaterial3D::TEXTURE_CHANNEL_ALPHA:
+			return TfToken("a");
+		case BaseMaterial3D::TEXTURE_CHANNEL_GRAYSCALE:
+		default:
+			return TfToken("rgb");
+	}
+}
+
+SdfValueTypeName get_usd_output_type_for_channel(BaseMaterial3D::TextureChannel p_channel) {
+	return p_channel == BaseMaterial3D::TEXTURE_CHANNEL_GRAYSCALE ? SdfValueTypeNames->Float3 : SdfValueTypeNames->Float;
+}
+
+bool write_texture_uv_transform(const BaseMaterial3D *p_material, const UsdStageRefPtr &p_stage, UsdShadeShader p_texture_shader, const SdfPath &p_shader_path) {
+	ERR_FAIL_NULL_V(p_material, false);
+	if (!p_texture_shader || p_stage == nullptr) {
+		return false;
+	}
+
+	const Vector3 uv_scale = p_material->get_uv1_scale();
+	const Vector3 uv_offset = p_material->get_uv1_offset();
+	if (uv_scale.is_equal_approx(Vector3(1.0f, 1.0f, 1.0f)) && uv_offset.is_equal_approx(Vector3())) {
+		return false;
+	}
+
+	UsdShadeShader uv_transform = UsdShadeShader::Define(p_stage, p_shader_path.AppendChild(TfToken("UVTransform")));
+	uv_transform.CreateIdAttr(VtValue(TfToken("UsdTransform2d")));
+	uv_transform.CreateInput(TfToken("scale"), SdfValueTypeNames->Float2).Set(GfVec2f(uv_scale.x, uv_scale.y));
+	uv_transform.CreateInput(TfToken("translation"), SdfValueTypeNames->Float2).Set(GfVec2f(uv_offset.x, 1.0f - uv_scale.y - uv_offset.y));
+	uv_transform.CreateInput(TfToken("rotation"), SdfValueTypeNames->Float).Set(0.0f);
+
+	UsdShadeOutput uv_output = uv_transform.CreateOutput(TfToken("result"), SdfValueTypeNames->Float2);
+	p_texture_shader.CreateInput(TfToken("st"), SdfValueTypeNames->Float2).ConnectToSource(uv_output);
+	return true;
+}
+
+String get_generated_texture_asset_path(const Ref<Texture2D> &p_texture, const String &p_save_path, const String &p_generated_asset_name) {
+	if (p_texture.is_null()) {
+		return String();
+	}
+
+	Ref<Image> image = p_texture->get_image();
+	if (image.is_null()) {
+		return String();
+	}
+
+	image = image->duplicate(true);
+	if (image->is_compressed()) {
+		image->decompress();
+	}
+	if (image->get_format() != Image::FORMAT_RGBA8) {
+		image->convert(Image::FORMAT_RGBA8);
+	}
+
+	const String absolute_save_path = get_absolute_path(p_save_path);
+	const String save_dir = absolute_save_path.get_base_dir();
+	const String save_stem = absolute_save_path.get_file().get_basename();
+	const String asset_dir_name = make_valid_identifier(save_stem).to_lower() + "_assets";
+	const String asset_file_name = make_valid_identifier(p_generated_asset_name).to_lower() + ".png";
+	const String absolute_asset_dir = save_dir.path_join(asset_dir_name);
+	const Error mkdir_error = DirAccess::make_dir_recursive_absolute(absolute_asset_dir);
+	if (mkdir_error != OK) {
+		return String();
+	}
+
+	const String absolute_asset_path = absolute_asset_dir.path_join(asset_file_name);
+	if (image->save_png(absolute_asset_path) != OK) {
+		return String();
+	}
+
+	return asset_dir_name.path_join(asset_file_name);
+}
+
+bool connect_preview_texture_asset_path(const UsdStageRefPtr &p_stage, const String &p_asset_path, const BaseMaterial3D *p_material, const SdfPath &p_material_path, const char *p_shader_name, const char *p_input_name, const SdfValueTypeName &p_input_type, const TfToken &p_output_name, const SdfValueTypeName &p_output_type) {
+	ERR_FAIL_NULL_V(p_material, false);
+	if (p_stage == nullptr || p_asset_path.is_empty()) {
+		return false;
+	}
+
+	UsdShadeShader preview_surface = UsdShadeShader::Get(p_stage, p_material_path.AppendChild(TfToken("PreviewSurface")));
+	if (!preview_surface) {
+		return false;
+	}
+
+	const SdfPath texture_shader_path = p_material_path.AppendChild(TfToken(p_shader_name));
+	UsdShadeShader texture_shader = UsdShadeShader::Define(p_stage, texture_shader_path);
+	texture_shader.CreateIdAttr(VtValue(TfToken("UsdUVTexture")));
+	texture_shader.CreateInput(TfToken("file"), SdfValueTypeNames->Asset).Set(SdfAssetPath(p_asset_path.utf8().get_data()));
+	write_texture_uv_transform(p_material, p_stage, texture_shader, texture_shader_path);
+
+	UsdShadeOutput texture_output = texture_shader.CreateOutput(p_output_name, p_output_type);
+	preview_surface.CreateInput(TfToken(p_input_name), p_input_type).ConnectToSource(texture_output);
+	return true;
+}
+
+bool connect_preview_texture(const UsdStageRefPtr &p_stage, const String &p_save_path, const BaseMaterial3D *p_material, const Ref<Texture2D> &p_texture, const SdfPath &p_material_path, const char *p_shader_name, const char *p_input_name, const SdfValueTypeName &p_input_type, const TfToken &p_output_name, const SdfValueTypeName &p_output_type) {
+	ERR_FAIL_NULL_V(p_material, false);
+	if (p_texture.is_null()) {
+		return false;
+	}
+
+	const String generated_asset_name = vformat("%s_%s", make_valid_identifier(to_godot_string(p_material_path.GetName())), make_valid_identifier(String(p_shader_name)));
+	const String asset_path = get_generated_texture_asset_path(p_texture, p_save_path, generated_asset_name);
+	if (asset_path.is_empty()) {
+		return false;
+	}
+
+	return connect_preview_texture_asset_path(p_stage, asset_path, p_material, p_material_path, p_shader_name, p_input_name, p_input_type, p_output_name, p_output_type);
 }
 
 } // namespace
@@ -593,7 +747,7 @@ Ref<Material> build_material_from_usd_material(const UsdStageRefPtr &p_stage, co
 	return material;
 }
 
-bool write_preview_material(const UsdStageRefPtr &p_stage, const Ref<Material> &p_material, const SdfPath &p_mesh_path, const String &p_material_key, UsdShadeMaterial *r_material) {
+bool write_preview_material(const UsdStageRefPtr &p_stage, const Ref<Material> &p_material, const SdfPath &p_mesh_path, const String &p_save_path, const String &p_material_key, UsdShadeMaterial *r_material) {
 	ERR_FAIL_NULL_V(r_material, false);
 	*r_material = UsdShadeMaterial();
 	ERR_FAIL_COND_V(p_stage == nullptr, false);
@@ -654,6 +808,31 @@ bool write_preview_material(const UsdStageRefPtr &p_stage, const Ref<Material> &
 	if (has_clearcoat) {
 		preview_surface.CreateInput(TfToken("clearcoat"), SdfValueTypeNames->Float).Set(base_material->get_clearcoat());
 		preview_surface.CreateInput(TfToken("clearcoatRoughness"), SdfValueTypeNames->Float).Set(base_material->get_clearcoat_roughness());
+	}
+
+	connect_preview_texture(p_stage, p_save_path, base_material, base_material->get_texture(BaseMaterial3D::TEXTURE_ALBEDO), material_path, "AlbedoTexture", "diffuseColor", SdfValueTypeNames->Color3f, TfToken("rgb"), SdfValueTypeNames->Float3);
+	connect_preview_texture(p_stage, p_save_path, base_material, base_material->get_texture(BaseMaterial3D::TEXTURE_EMISSION), material_path, "EmissionTexture", "emissiveColor", SdfValueTypeNames->Color3f, TfToken("rgb"), SdfValueTypeNames->Float3);
+	connect_preview_texture(p_stage, p_save_path, base_material, base_material->get_texture(BaseMaterial3D::TEXTURE_NORMAL), material_path, "NormalTexture", "normal", SdfValueTypeNames->Normal3f, TfToken("rgb"), SdfValueTypeNames->Float3);
+	connect_preview_texture(p_stage, p_save_path, base_material, base_material->get_texture(BaseMaterial3D::TEXTURE_METALLIC), material_path, "MetallicTexture", "metallic", SdfValueTypeNames->Float, get_usd_texture_output_for_channel(base_material->get_metallic_texture_channel()), get_usd_output_type_for_channel(base_material->get_metallic_texture_channel()));
+	connect_preview_texture(p_stage, p_save_path, base_material, base_material->get_texture(BaseMaterial3D::TEXTURE_ROUGHNESS), material_path, "RoughnessTexture", "roughness", SdfValueTypeNames->Float, get_usd_texture_output_for_channel(base_material->get_roughness_texture_channel()), get_usd_output_type_for_channel(base_material->get_roughness_texture_channel()));
+	if (base_material->get_transparency() != BaseMaterial3D::TRANSPARENCY_DISABLED) {
+		const Dictionary opacity_source = get_preview_surface_texture_source(base_material, "opacity");
+		if (!opacity_source.is_empty()) {
+			const String source_asset_path = opacity_source.get("asset_path", String());
+			const String output_name = opacity_source.get("output_name", String("a"));
+			connect_preview_texture_asset_path(p_stage, source_asset_path, base_material, material_path, "OpacityTexture", "opacity", SdfValueTypeNames->Float, get_usd_texture_output_for_name(output_name), get_usd_output_type_for_name(output_name));
+		} else {
+			connect_preview_texture(p_stage, p_save_path, base_material, base_material->get_texture(BaseMaterial3D::TEXTURE_ALBEDO), material_path, "AlbedoTexture", "opacity", SdfValueTypeNames->Float, TfToken("a"), SdfValueTypeNames->Float);
+		}
+	}
+	if (has_clearcoat) {
+		const Ref<Texture2D> clearcoat_texture = base_material->get_texture(BaseMaterial3D::TEXTURE_CLEARCOAT);
+		connect_preview_texture(p_stage, p_save_path, base_material, clearcoat_texture, material_path, "ClearcoatTexture", "clearcoat", SdfValueTypeNames->Float, TfToken("r"), SdfValueTypeNames->Float);
+		connect_preview_texture(p_stage, p_save_path, base_material, clearcoat_texture, material_path, "ClearcoatTexture", "clearcoatRoughness", SdfValueTypeNames->Float, TfToken("g"), SdfValueTypeNames->Float);
+	}
+	const bool has_occlusion = base_material->get_feature(BaseMaterial3D::FEATURE_AMBIENT_OCCLUSION) || base_material->get_texture(BaseMaterial3D::TEXTURE_AMBIENT_OCCLUSION).is_valid();
+	if (has_occlusion) {
+		connect_preview_texture(p_stage, p_save_path, base_material, base_material->get_texture(BaseMaterial3D::TEXTURE_AMBIENT_OCCLUSION), material_path, "OcclusionTexture", "occlusion", SdfValueTypeNames->Float, get_usd_texture_output_for_channel(base_material->get_ao_texture_channel()), get_usd_output_type_for_channel(base_material->get_ao_texture_channel()));
 	}
 
 	*r_material = usd_material;

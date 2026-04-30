@@ -40,7 +40,7 @@ Ref<Image> make_opacity_composited_albedo(const Ref<Texture2D> &p_albedo_texture
 float preview_surface_f0_from_ior(float p_ior);
 float godot_specular_from_preview_f0(float p_f0);
 Ref<Material> build_material_from_usd_material(const UsdStageRefPtr &p_stage, const UsdTimeCode &p_time, const UsdShadeMaterial &p_material, Dictionary *r_mapping_notes = nullptr);
-bool write_preview_material(const UsdStageRefPtr &p_stage, const Ref<Material> &p_material, const SdfPath &p_mesh_path, const String &p_material_key, UsdShadeMaterial *r_material);
+bool write_preview_material(const UsdStageRefPtr &p_stage, const Ref<Material> &p_material, const SdfPath &p_mesh_path, const String &p_save_path, const String &p_material_key, UsdShadeMaterial *r_material);
 Ref<Material> make_display_color_material(const Color &p_color, bool p_use_vertex_colors);
 
 } // namespace godot_usd

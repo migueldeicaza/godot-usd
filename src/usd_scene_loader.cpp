@@ -156,9 +156,9 @@ void apply_node3d_transform(const Node3D *p_node, UsdGeomXformable p_xformable) 
 	apply_transform_components(transform.origin, transform.basis.get_rotation_quaternion(), transform.basis.get_scale(), p_node->is_visible(), p_xformable);
 }
 
-bool export_node_children_to_stage(Node *p_node, const SdfPath &p_parent_path, const UsdStageRefPtr &p_stage);
+bool export_node_children_to_stage(Node *p_node, const SdfPath &p_parent_path, const UsdStageRefPtr &p_stage, const String &p_save_path);
 
-void bind_mesh_instance_material(MeshInstance3D *p_mesh_instance, const UsdPrim &p_prim, const SdfPath &p_prim_path, const UsdStageRefPtr &p_stage) {
+void bind_mesh_instance_material(MeshInstance3D *p_mesh_instance, const UsdPrim &p_prim, const SdfPath &p_prim_path, const UsdStageRefPtr &p_stage, const String &p_save_path) {
 	ERR_FAIL_NULL(p_mesh_instance);
 	ERR_FAIL_COND(p_stage == nullptr);
 	if (!p_prim) {
@@ -177,12 +177,12 @@ void bind_mesh_instance_material(MeshInstance3D *p_mesh_instance, const UsdPrim 
 	}
 
 	UsdShadeMaterial usd_material;
-	if (write_preview_material(p_stage, material, p_prim_path, material->get_name(), &usd_material) && usd_material) {
+	if (write_preview_material(p_stage, material, p_prim_path, p_save_path, material->get_name(), &usd_material) && usd_material) {
 		UsdShadeMaterialBindingAPI::Apply(p_prim).Bind(usd_material);
 	}
 }
 
-bool export_mesh_instance_to_stage(MeshInstance3D *p_mesh_instance, const SdfPath &p_prim_path, const UsdStageRefPtr &p_stage) {
+bool export_mesh_instance_to_stage(MeshInstance3D *p_mesh_instance, const SdfPath &p_prim_path, const UsdStageRefPtr &p_stage, const String &p_save_path) {
 	ERR_FAIL_NULL_V(p_mesh_instance, false);
 	ERR_FAIL_COND_V(p_stage == nullptr, false);
 
@@ -190,7 +190,7 @@ bool export_mesh_instance_to_stage(MeshInstance3D *p_mesh_instance, const SdfPat
 	if (mesh.is_null()) {
 		UsdGeomXform xform = UsdGeomXform::Define(p_stage, p_prim_path);
 		apply_node3d_transform(p_mesh_instance, xform);
-		export_node_children_to_stage(p_mesh_instance, p_prim_path, p_stage);
+		export_node_children_to_stage(p_mesh_instance, p_prim_path, p_stage, p_save_path);
 		return true;
 	}
 
@@ -202,8 +202,8 @@ bool export_mesh_instance_to_stage(MeshInstance3D *p_mesh_instance, const SdfPat
 		const Transform3D transform = p_mesh_instance->get_transform();
 		const Vector3 combined_scale = transform.basis.get_scale() * size;
 		apply_transform_components(transform.origin, transform.basis.get_rotation_quaternion(), combined_scale, p_mesh_instance->is_visible(), cube);
-		bind_mesh_instance_material(p_mesh_instance, cube.GetPrim(), p_prim_path, p_stage);
-		export_node_children_to_stage(p_mesh_instance, p_prim_path, p_stage);
+		bind_mesh_instance_material(p_mesh_instance, cube.GetPrim(), p_prim_path, p_stage, p_save_path);
+		export_node_children_to_stage(p_mesh_instance, p_prim_path, p_stage, p_save_path);
 		return true;
 	}
 
@@ -212,8 +212,8 @@ bool export_mesh_instance_to_stage(MeshInstance3D *p_mesh_instance, const SdfPat
 		UsdGeomSphere sphere = UsdGeomSphere::Define(p_stage, p_prim_path);
 		sphere.GetRadiusAttr().Set((double)sphere_mesh->get_radius());
 		apply_node3d_transform(p_mesh_instance, sphere);
-		bind_mesh_instance_material(p_mesh_instance, sphere.GetPrim(), p_prim_path, p_stage);
-		export_node_children_to_stage(p_mesh_instance, p_prim_path, p_stage);
+		bind_mesh_instance_material(p_mesh_instance, sphere.GetPrim(), p_prim_path, p_stage, p_save_path);
+		export_node_children_to_stage(p_mesh_instance, p_prim_path, p_stage, p_save_path);
 		return true;
 	}
 
@@ -224,8 +224,8 @@ bool export_mesh_instance_to_stage(MeshInstance3D *p_mesh_instance, const SdfPat
 		capsule.GetHeightAttr().Set((double)capsule_mesh->get_height());
 		capsule.GetAxisAttr().Set(UsdGeomTokens->y);
 		apply_node3d_transform(p_mesh_instance, capsule);
-		bind_mesh_instance_material(p_mesh_instance, capsule.GetPrim(), p_prim_path, p_stage);
-		export_node_children_to_stage(p_mesh_instance, p_prim_path, p_stage);
+		bind_mesh_instance_material(p_mesh_instance, capsule.GetPrim(), p_prim_path, p_stage, p_save_path);
+		export_node_children_to_stage(p_mesh_instance, p_prim_path, p_stage, p_save_path);
 		return true;
 	}
 
@@ -239,8 +239,8 @@ bool export_mesh_instance_to_stage(MeshInstance3D *p_mesh_instance, const SdfPat
 			cone.GetHeightAttr().Set((double)cylinder_mesh->get_height());
 			cone.GetAxisAttr().Set(UsdGeomTokens->y);
 			apply_node3d_transform(p_mesh_instance, cone);
-			bind_mesh_instance_material(p_mesh_instance, cone.GetPrim(), p_prim_path, p_stage);
-			export_node_children_to_stage(p_mesh_instance, p_prim_path, p_stage);
+			bind_mesh_instance_material(p_mesh_instance, cone.GetPrim(), p_prim_path, p_stage, p_save_path);
+			export_node_children_to_stage(p_mesh_instance, p_prim_path, p_stage, p_save_path);
 			return true;
 		}
 		if (Math::is_equal_approx(top_radius, bottom_radius)) {
@@ -249,8 +249,8 @@ bool export_mesh_instance_to_stage(MeshInstance3D *p_mesh_instance, const SdfPat
 			cylinder.GetHeightAttr().Set((double)cylinder_mesh->get_height());
 			cylinder.GetAxisAttr().Set(UsdGeomTokens->y);
 			apply_node3d_transform(p_mesh_instance, cylinder);
-			bind_mesh_instance_material(p_mesh_instance, cylinder.GetPrim(), p_prim_path, p_stage);
-			export_node_children_to_stage(p_mesh_instance, p_prim_path, p_stage);
+			bind_mesh_instance_material(p_mesh_instance, cylinder.GetPrim(), p_prim_path, p_stage, p_save_path);
+			export_node_children_to_stage(p_mesh_instance, p_prim_path, p_stage, p_save_path);
 			return true;
 		}
 	}
@@ -263,37 +263,37 @@ bool export_mesh_instance_to_stage(MeshInstance3D *p_mesh_instance, const SdfPat
 		plane.GetLengthAttr().Set((double)size.y);
 		plane.GetAxisAttr().Set(UsdGeomTokens->y);
 		apply_node3d_transform(p_mesh_instance, plane);
-		bind_mesh_instance_material(p_mesh_instance, plane.GetPrim(), p_prim_path, p_stage);
-		export_node_children_to_stage(p_mesh_instance, p_prim_path, p_stage);
+		bind_mesh_instance_material(p_mesh_instance, plane.GetPrim(), p_prim_path, p_stage, p_save_path);
+		export_node_children_to_stage(p_mesh_instance, p_prim_path, p_stage, p_save_path);
 		return true;
 	}
 
 	UsdGeomXform fallback_xform = UsdGeomXform::Define(p_stage, p_prim_path);
 	apply_node3d_transform(p_mesh_instance, fallback_xform);
 	set_usd_metadata(p_mesh_instance, "usd:save_status", "Unsupported Mesh resource type for baseline saver; exported transform hierarchy only.");
-	export_node_children_to_stage(p_mesh_instance, p_prim_path, p_stage);
+	export_node_children_to_stage(p_mesh_instance, p_prim_path, p_stage, p_save_path);
 	return true;
 }
 
-bool export_node_to_stage(Node *p_node, const SdfPath &p_prim_path, const UsdStageRefPtr &p_stage) {
+bool export_node_to_stage(Node *p_node, const SdfPath &p_prim_path, const UsdStageRefPtr &p_stage, const String &p_save_path) {
 	ERR_FAIL_NULL_V(p_node, false);
 	ERR_FAIL_COND_V(p_stage == nullptr, false);
 
 	if (MeshInstance3D *mesh_instance = Object::cast_to<MeshInstance3D>(p_node)) {
-		return export_mesh_instance_to_stage(mesh_instance, p_prim_path, p_stage);
+		return export_mesh_instance_to_stage(mesh_instance, p_prim_path, p_stage, p_save_path);
 	}
 
 	if (Node3D *node_3d = Object::cast_to<Node3D>(p_node)) {
 		UsdGeomXform xform = UsdGeomXform::Define(p_stage, p_prim_path);
 		apply_node3d_transform(node_3d, xform);
-		export_node_children_to_stage(p_node, p_prim_path, p_stage);
+		export_node_children_to_stage(p_node, p_prim_path, p_stage, p_save_path);
 		return true;
 	}
 
 	return false;
 }
 
-bool export_node_children_to_stage(Node *p_node, const SdfPath &p_parent_path, const UsdStageRefPtr &p_stage) {
+bool export_node_children_to_stage(Node *p_node, const SdfPath &p_parent_path, const UsdStageRefPtr &p_stage, const String &p_save_path) {
 	ERR_FAIL_NULL_V(p_node, false);
 	ERR_FAIL_COND_V(p_stage == nullptr, false);
 
@@ -308,7 +308,7 @@ bool export_node_children_to_stage(Node *p_node, const SdfPath &p_parent_path, c
 		name_count++;
 
 		const SdfPath child_path = p_parent_path.AppendChild(make_valid_prim_token(prim_name));
-		if (export_node_to_stage(child, child_path, p_stage)) {
+		if (export_node_to_stage(child, child_path, p_stage, p_save_path)) {
 			exported_any_child = true;
 		}
 	}
@@ -353,12 +353,12 @@ Error save_authored_packed_scene_to_stage(const Ref<PackedScene> &p_packed_scene
 	}
 	const String root_name = make_valid_prim_identifier(root_name_source);
 	const SdfPath root_path("/" + std::string(root_name.utf8().get_data()));
-	if (!export_node_to_stage(root, root_path, stage)) {
+	if (!export_node_to_stage(root, root_path, stage, p_path)) {
 		UsdGeomXform root_xform = UsdGeomXform::Define(stage, root_path);
 		if (Node3D *root_node_3d = Object::cast_to<Node3D>(root)) {
 			apply_node3d_transform(root_node_3d, root_xform);
 		}
-		if (!export_node_children_to_stage(root, root_path, stage)) {
+		if (!export_node_children_to_stage(root, root_path, stage, p_path)) {
 			memdelete(root);
 			return ERR_CANT_CREATE;
 		}
