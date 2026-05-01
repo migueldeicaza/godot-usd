@@ -8,11 +8,15 @@ class UsdSceneFormatImporter : public EditorSceneFormatImporter {
 	GDCLASS(UsdSceneFormatImporter, EditorSceneFormatImporter);
 
 protected:
-	static void _bind_methods() {}
+	static void _bind_methods();
 
 public:
 	PackedStringArray _get_extensions() const override;
 	Object *_import_scene(const String &p_path, uint32_t p_flags, const Dictionary &p_options) override;
 	void _get_import_options(const String &p_path) override;
 	Variant _get_option_visibility(const String &p_path, bool p_for_animation, const String &p_option) const override;
+
+	Array get_import_options_snapshot(const String &p_path) const;
+	Object *import_scene(const String &p_path, const Dictionary &p_options = Dictionary());
+	Variant get_option_visibility(const String &p_path, const String &p_option) const;
 };

@@ -132,6 +132,71 @@ void apply_variant_selections(const UsdStageRefPtr &p_stage, const Dictionary &p
 	}
 }
 
+void collect_variant_sets_for_prim(const UsdPrim &p_prim, Dictionary *r_variant_catalog) {
+	ERR_FAIL_NULL(r_variant_catalog);
+	if (!p_prim) {
+		return;
+	}
+
+	UsdVariantSets variant_sets = p_prim.GetVariantSets();
+	std::vector<std::string> set_names;
+	variant_sets.GetNames(&set_names);
+	if (!set_names.empty()) {
+		Dictionary prim_variant_sets;
+		for (const std::string &set_name : set_names) {
+			UsdVariantSet variant_set = variant_sets.GetVariantSet(set_name);
+			if (!variant_set) {
+				continue;
+			}
+
+			Array variants;
+			const std::vector<std::string> variant_names = variant_set.GetVariantNames();
+			for (const std::string &variant_name : variant_names) {
+				variants.push_back(to_godot_string(variant_name));
+			}
+
+			Dictionary set_description;
+			set_description["prim_path"] = to_godot_string(p_prim.GetPath().GetString());
+			set_description["variant_set"] = to_godot_string(set_name);
+			set_description["variants"] = variants;
+			set_description["selection"] = to_godot_string(variant_set.GetVariantSelection());
+			prim_variant_sets[to_godot_string(set_name)] = set_description;
+		}
+
+		if (!prim_variant_sets.is_empty()) {
+			(*r_variant_catalog)[to_godot_string(p_prim.GetPath().GetString())] = prim_variant_sets;
+		}
+	}
+
+	for (const UsdPrim &child : p_prim.GetChildren()) {
+		collect_variant_sets_for_prim(child, r_variant_catalog);
+	}
+
+	for (const std::string &set_name : set_names) {
+		UsdVariantSet variant_set = variant_sets.GetVariantSet(set_name);
+		if (!variant_set) {
+			continue;
+		}
+
+		const std::string original_selection = variant_set.GetVariantSelection();
+		const std::vector<std::string> variant_names = variant_set.GetVariantNames();
+		for (const std::string &variant_name : variant_names) {
+			if (!variant_set.SetVariantSelection(variant_name)) {
+				continue;
+			}
+			for (const UsdPrim &child : p_prim.GetChildren()) {
+				collect_variant_sets_for_prim(child, r_variant_catalog);
+			}
+		}
+
+		if (original_selection.empty()) {
+			variant_set.ClearVariantSelection();
+		} else {
+			variant_set.SetVariantSelection(original_selection);
+		}
+	}
+}
+
 } // namespace
 
 String to_godot_string(const std::string &p_string) {
@@ -212,38 +277,8 @@ Dictionary collect_variant_sets(const UsdStageRefPtr &p_stage) {
 	Dictionary variant_catalog;
 	ERR_FAIL_COND_V(p_stage == nullptr, variant_catalog);
 
-	for (const UsdPrim &prim : p_stage->TraverseAll()) {
-		UsdVariantSets variant_sets = prim.GetVariantSets();
-		std::vector<std::string> set_names;
-		variant_sets.GetNames(&set_names);
-		if (set_names.empty()) {
-			continue;
-		}
-
-		Dictionary prim_variant_sets;
-		for (const std::string &set_name : set_names) {
-			UsdVariantSet variant_set = variant_sets.GetVariantSet(set_name);
-			if (!variant_set) {
-				continue;
-			}
-
-			Array variants;
-			const std::vector<std::string> variant_names = variant_set.GetVariantNames();
-			for (const std::string &variant_name : variant_names) {
-				variants.push_back(to_godot_string(variant_name));
-			}
-
-			Dictionary set_description;
-			set_description["prim_path"] = to_godot_string(prim.GetPath().GetString());
-			set_description["variant_set"] = to_godot_string(set_name);
-			set_description["variants"] = variants;
-			set_description["selection"] = to_godot_string(variant_set.GetVariantSelection());
-			prim_variant_sets[to_godot_string(set_name)] = set_description;
-		}
-
-		if (!prim_variant_sets.is_empty()) {
-			variant_catalog[to_godot_string(prim.GetPath().GetString())] = prim_variant_sets;
-		}
+	for (const UsdPrim &child : p_stage->GetPseudoRoot().GetChildren()) {
+		collect_variant_sets_for_prim(child, &variant_catalog);
 	}
 
 	return variant_catalog;

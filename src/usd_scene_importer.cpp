@@ -4,8 +4,11 @@
 #include <godot_cpp/classes/node.hpp>
 #include <godot_cpp/classes/packed_scene.hpp>
 #include <godot_cpp/classes/resource_loader.hpp>
+#include <godot_cpp/core/class_db.hpp>
 #include <godot_cpp/core/error_macros.hpp>
 #include <godot_cpp/core/memory.hpp>
+#include <godot_cpp/core/property_info.hpp>
+#include <godot_cpp/variant/array.hpp>
 #include <godot_cpp/variant/utility_functions.hpp>
 
 #include "usd_scene_loader.h"
@@ -152,7 +155,90 @@ Dictionary get_stage_variant_catalog(const String &p_path) {
 	return stage->get_variant_sets();
 }
 
+Array build_import_warnings(const Dictionary &p_variant_catalog, const Dictionary &p_variant_selections) {
+	Array warnings;
+	if (!p_variant_catalog.is_empty()) {
+		String message = "UsdSceneFormatImporter baked a composed USD scene. Inactive variant branches and live variant switching are not preserved in the imported result.";
+		if (!p_variant_selections.is_empty()) {
+			message += " Import-time variant selections are recorded in node metadata.";
+		}
+		warnings.push_back(message);
+	}
+	return warnings;
+}
+
+void append_variant_import_options(const Dictionary &p_variant_catalog, Array *r_options) {
+	ERR_FAIL_NULL(r_options);
+	if (p_variant_catalog.is_empty()) {
+		return;
+	}
+
+	Dictionary group_option;
+	group_option["name"] = "USD Variants";
+	group_option["type"] = Variant::NIL;
+	group_option["hint"] = PROPERTY_HINT_NONE;
+	group_option["hint_string"] = "usd/variants/";
+	group_option["usage"] = PROPERTY_USAGE_GROUP;
+	group_option["default_value"] = Variant();
+	r_options->push_back(group_option);
+
+	Array prim_keys = p_variant_catalog.keys();
+	for (int i = 0; i < prim_keys.size(); i++) {
+		const String prim_path = prim_keys[i];
+		const Variant prim_sets_variant = p_variant_catalog[prim_path];
+		if (prim_sets_variant.get_type() != Variant::DICTIONARY) {
+			continue;
+		}
+
+		const Dictionary prim_sets = prim_sets_variant;
+		Array set_keys = prim_sets.keys();
+		for (int set_index = 0; set_index < set_keys.size(); set_index++) {
+			const String variant_set_name = set_keys[set_index];
+			const Variant set_description_variant = prim_sets[variant_set_name];
+			if (set_description_variant.get_type() != Variant::DICTIONARY) {
+				continue;
+			}
+
+			const Dictionary set_description = set_description_variant;
+			const Array variants = set_description.get("variants", Array());
+			if (variants.is_empty()) {
+				continue;
+			}
+
+			String hint_string;
+			for (int variant_index = 0; variant_index < variants.size(); variant_index++) {
+				const Variant variant_name = variants[variant_index];
+				if (variant_name.get_type() != Variant::STRING && variant_name.get_type() != Variant::STRING_NAME) {
+					continue;
+				}
+				if (!hint_string.is_empty()) {
+					hint_string += ",";
+				}
+				hint_string += String(variant_name);
+			}
+			if (hint_string.is_empty()) {
+				continue;
+			}
+
+			Dictionary option;
+			option["name"] = get_variant_option_name(prim_path, variant_set_name);
+			option["type"] = Variant::STRING;
+			option["hint"] = PROPERTY_HINT_ENUM;
+			option["hint_string"] = hint_string;
+			option["usage"] = PROPERTY_USAGE_DEFAULT | PROPERTY_USAGE_UPDATE_ALL_IF_MODIFIED;
+			option["default_value"] = String(set_description.get("selection", String()));
+			r_options->push_back(option);
+		}
+	}
+}
+
 } // namespace
+
+void UsdSceneFormatImporter::_bind_methods() {
+	ClassDB::bind_method(D_METHOD("get_import_options_snapshot", "path"), &UsdSceneFormatImporter::get_import_options_snapshot);
+	ClassDB::bind_method(D_METHOD("import_scene", "path", "options"), &UsdSceneFormatImporter::import_scene, DEFVAL(Dictionary()));
+	ClassDB::bind_method(D_METHOD("get_option_visibility", "path", "option"), &UsdSceneFormatImporter::get_option_visibility);
+}
 
 PackedStringArray UsdSceneFormatImporter::_get_extensions() const {
 	PackedStringArray extensions;
@@ -203,6 +289,13 @@ Object *UsdSceneFormatImporter::_import_scene(const String &p_path, uint32_t p_f
 	stage_instance->remove_child(generated_root);
 	clear_generated_root_marker_recursive(generated_root);
 	generated_root->set_name(p_path.get_file().get_basename());
+	const Dictionary source_variant_catalog = stage_instance->get_stage().is_valid() ? stage_instance->get_stage()->get_variant_sets() : Dictionary();
+	const Array import_warnings = build_import_warnings(source_variant_catalog, variant_selections);
+	for (int i = 0; i < import_warnings.size(); i++) {
+		if (import_warnings[i].get_type() == Variant::STRING || import_warnings[i].get_type() == Variant::STRING_NAME) {
+			UtilityFunctions::push_warning(String(import_warnings[i]));
+		}
+	}
 	memdelete(stage_instance);
 	return generated_root;
 }
@@ -270,4 +363,30 @@ Variant UsdSceneFormatImporter::_get_option_visibility(const String &p_path, boo
 		return false;
 	}
 	return true;
+}
+
+Array UsdSceneFormatImporter::get_import_options_snapshot(const String &p_path) const {
+	Array options;
+
+	Dictionary legacy_option;
+	legacy_option["name"] = USD_IMPORT_OPTION_VARIANT_SELECTIONS;
+	legacy_option["type"] = Variant::STRING;
+	legacy_option["hint"] = PROPERTY_HINT_NONE;
+	legacy_option["hint_string"] = String();
+	legacy_option["usage"] = PROPERTY_USAGE_NO_EDITOR;
+	legacy_option["default_value"] = String();
+	options.push_back(legacy_option);
+
+	if (!p_path.is_empty()) {
+		append_variant_import_options(get_stage_variant_catalog(p_path), &options);
+	}
+	return options;
+}
+
+Object *UsdSceneFormatImporter::import_scene(const String &p_path, const Dictionary &p_options) {
+	return _import_scene(p_path, IMPORT_SCENE, p_options);
+}
+
+Variant UsdSceneFormatImporter::get_option_visibility(const String &p_path, const String &p_option) const {
+	return _get_option_visibility(p_path, false, p_option);
 }
