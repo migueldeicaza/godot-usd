@@ -2006,6 +2006,8 @@ void UsdStageInstance::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_stage"), &UsdStageInstance::get_stage);
 	ClassDB::bind_method(D_METHOD("set_variant_selections", "variant_selections"), &UsdStageInstance::set_variant_selections);
 	ClassDB::bind_method(D_METHOD("get_variant_selections"), &UsdStageInstance::get_variant_selections);
+	ClassDB::bind_method(D_METHOD("set_runtime_node_overrides", "runtime_node_overrides"), &UsdStageInstance::set_runtime_node_overrides);
+	ClassDB::bind_method(D_METHOD("get_runtime_node_overrides"), &UsdStageInstance::get_runtime_node_overrides);
 	ClassDB::bind_method(D_METHOD("set_debug_logging", "debug_logging"), &UsdStageInstance::set_debug_logging);
 	ClassDB::bind_method(D_METHOD("is_debug_logging"), &UsdStageInstance::is_debug_logging);
 	ClassDB::bind_method(D_METHOD("get_debug_rebuild_count"), &UsdStageInstance::get_debug_rebuild_count);
@@ -2017,6 +2019,7 @@ void UsdStageInstance::_bind_methods() {
 
 	ADD_PROPERTY(PropertyInfo(Variant::OBJECT, "stage", PROPERTY_HINT_RESOURCE_TYPE, "UsdStageResource"), "set_stage", "get_stage");
 	ADD_PROPERTY(PropertyInfo(Variant::DICTIONARY, "variant_selections", PROPERTY_HINT_NONE, String(), PROPERTY_USAGE_NO_EDITOR), "set_variant_selections", "get_variant_selections");
+	ADD_PROPERTY(PropertyInfo(Variant::DICTIONARY, "runtime_node_overrides", PROPERTY_HINT_NONE, String(), PROPERTY_USAGE_NO_EDITOR), "set_runtime_node_overrides", "get_runtime_node_overrides");
 	ADD_GROUP("USD Debug", "debug_");
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "debug_logging"), "set_debug_logging", "is_debug_logging");
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "debug_rebuild_count", PROPERTY_HINT_NONE, String(), PROPERTY_USAGE_EDITOR | PROPERTY_USAGE_READ_ONLY), "", "get_debug_rebuild_count");
@@ -2112,6 +2115,96 @@ String UsdStageInstance::_get_prim_path_for_node(const Node *p_node) const {
 	return metadata.get("usd:prim_path", String());
 }
 
+bool UsdStageInstance::_get_node3d_runtime_state(Node *p_node, Dictionary *r_state) const {
+	ERR_FAIL_NULL_V(p_node, false);
+	ERR_FAIL_NULL_V(r_state, false);
+
+	Node3D *node_3d = Object::cast_to<Node3D>(p_node);
+	if (node_3d == nullptr) {
+		return false;
+	}
+
+	const String prim_path = _get_prim_path_for_node(p_node);
+	if (prim_path.is_empty()) {
+		return false;
+	}
+
+	Dictionary state;
+	state["transform"] = node_3d->get_transform();
+	state["visible"] = node_3d->is_visible();
+	*r_state = state;
+	return true;
+}
+
+bool UsdStageInstance::_node3d_runtime_state_matches(Node *p_node, const Dictionary &p_state) const {
+	ERR_FAIL_NULL_V(p_node, false);
+
+	Node3D *node_3d = Object::cast_to<Node3D>(p_node);
+	if (node_3d == nullptr) {
+		return false;
+	}
+
+	if (p_state.get("transform", Variant()).get_type() != Variant::TRANSFORM3D) {
+		return false;
+	}
+	if (!transforms_equal_approx(node_3d->get_transform(), p_state["transform"])) {
+		return false;
+	}
+
+	if (p_state.get("visible", Variant()).get_type() != Variant::BOOL) {
+		return false;
+	}
+	return node_3d->is_visible() == (bool)p_state["visible"];
+}
+
+void UsdStageInstance::_collect_runtime_node_baselines(Node *p_node, Dictionary *r_baselines) const {
+	ERR_FAIL_NULL(p_node);
+	ERR_FAIL_NULL(r_baselines);
+
+	Dictionary state;
+	if (_get_node3d_runtime_state(p_node, &state)) {
+		r_baselines->set(_get_prim_path_for_node(p_node), state);
+	}
+
+	for (int i = 0; i < p_node->get_child_count(); i++) {
+		_collect_runtime_node_baselines(p_node->get_child(i), r_baselines);
+	}
+}
+
+void UsdStageInstance::_refresh_runtime_node_baselines() {
+	generated_node_baselines.clear();
+	if (generated_root == nullptr) {
+		return;
+	}
+
+	_collect_runtime_node_baselines(generated_root, &generated_node_baselines);
+}
+
+void UsdStageInstance::_apply_runtime_node_overrides(Node *p_node) {
+	ERR_FAIL_NULL(p_node);
+
+	const String prim_path = _get_prim_path_for_node(p_node);
+	if (!prim_path.is_empty()) {
+		const Variant override_variant = runtime_node_overrides.get(prim_path, Variant());
+		if (override_variant.get_type() == Variant::DICTIONARY) {
+			Node3D *node_3d = Object::cast_to<Node3D>(p_node);
+			if (node_3d != nullptr) {
+				const Dictionary override_state = override_variant;
+				if (override_state.get("transform", Variant()).get_type() == Variant::TRANSFORM3D) {
+					node_3d->set_transform(override_state["transform"]);
+				}
+				if (override_state.get("visible", Variant()).get_type() == Variant::BOOL) {
+					node_3d->set_visible((bool)override_state["visible"]);
+				}
+			}
+		}
+	}
+
+	for (int i = 0; i < p_node->get_child_count(); i++) {
+		_apply_runtime_node_overrides(p_node->get_child(i));
+	}
+}
+
 bool UsdStageInstance::_parse_variant_property(const String &p_property, String *r_prim_path, String *r_variant_set) const {
 	if (!p_property.begins_with("variants/")) {
 		return false;
@@ -2186,6 +2279,8 @@ void UsdStageInstance::_stage_changed() {
 	notify_property_list_changed();
 	if (stage.is_null() || stage->get_source_path().is_empty()) {
 		composed_variant_sets.clear();
+		generated_node_baselines.clear();
+		runtime_node_overrides.clear();
 		_clear_generated_children();
 		return;
 	}
@@ -2293,6 +2388,8 @@ void UsdStageInstance::set_stage(const Ref<UsdStageResource> &p_stage) {
 	}
 
 	stage = p_stage;
+	generated_node_baselines.clear();
+	runtime_node_overrides.clear();
 	if (stage.is_valid()) {
 		stage->connect("changed", callable_mp(this, &UsdStageInstance::_stage_changed));
 	}
@@ -2305,6 +2402,8 @@ Ref<UsdStageResource> UsdStageInstance::get_stage() const {
 
 void UsdStageInstance::set_variant_selections(const Dictionary &p_variant_selections) {
 	variant_selections = p_variant_selections;
+	generated_node_baselines.clear();
+	runtime_node_overrides.clear();
 	debug_last_selection_change = "variant_selections dictionary replaced";
 	if (is_inside_tree() && stage.is_valid() && !stage->get_source_path().is_empty()) {
 		rebuild();
@@ -2314,6 +2413,43 @@ void UsdStageInstance::set_variant_selections(const Dictionary &p_variant_select
 
 Dictionary UsdStageInstance::get_variant_selections() const {
 	return variant_selections;
+}
+
+void UsdStageInstance::set_runtime_node_overrides(const Dictionary &p_runtime_node_overrides) {
+	runtime_node_overrides = p_runtime_node_overrides.duplicate(true);
+}
+
+Dictionary UsdStageInstance::get_runtime_node_overrides() const {
+	if (generated_root == nullptr) {
+		return runtime_node_overrides;
+	}
+
+	Dictionary current_states;
+	_collect_runtime_node_baselines(generated_root, &current_states);
+	Dictionary overrides = runtime_node_overrides.duplicate(true);
+	Array prim_keys = current_states.keys();
+	for (int i = 0; i < prim_keys.size(); i++) {
+		const String prim_path = prim_keys[i];
+		const Variant current_state_variant = current_states[prim_path];
+		if (current_state_variant.get_type() != Variant::DICTIONARY) {
+			continue;
+		}
+
+		const Dictionary current_state = current_state_variant;
+		const Variant baseline_variant = generated_node_baselines.get(prim_path, Variant());
+		if (baseline_variant.get_type() != Variant::DICTIONARY) {
+			overrides[prim_path] = current_state;
+			continue;
+		}
+
+		Node *current_node = _find_node_for_prim_path(generated_root, prim_path);
+		if (current_node != nullptr && !_node3d_runtime_state_matches(current_node, baseline_variant)) {
+			overrides[prim_path] = current_state;
+		} else {
+			overrides.erase(prim_path);
+		}
+	}
+	return overrides;
 }
 
 void UsdStageInstance::set_debug_logging(bool p_debug_logging) {
@@ -2386,6 +2522,8 @@ Error UsdStageInstance::rebuild() {
 
 	generated_root->set_meta(StringName("usd_stage_instance_source_path"), stage->get_source_path());
 	generated_root->set_meta(StringName("usd_stage_instance_variant_selections"), variant_selections);
+	_refresh_runtime_node_baselines();
+	_apply_runtime_node_overrides(generated_root);
 	mark_owner_recursive(generated_root, this);
 	debug_last_generated_summary = _get_generated_summary();
 	debug_last_rebuild_status = vformat("Rebuild #%d completed: %d generated root children.", debug_rebuild_count, generated_root->get_child_count());
@@ -2525,6 +2663,7 @@ Error UsdSceneFormatSaver::_save(const Ref<Resource> &p_resource, const String &
 	if (is_usd_scene_extension(destination_extension) && destination_extension == source_extension) {
 		const Dictionary variant_selections = stage_instance->get_variant_selections();
 		const Dictionary stage_variant_sets = stage_resource->get_variant_sets();
+		stage_instance->rebuild();
 		warn_source_stage_instance_composition_boundary_edits(root, stage_resource->get_source_path(), variant_selections);
 
 		if (variant_selections_match_stage_defaults(variant_selections, stage_variant_sets)) {

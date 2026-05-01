@@ -17,6 +17,13 @@ func _save_instantiated_scene(root: Node, path: String) -> int:
 		return pack_error
 	return ResourceSaver.save(saved_scene, path)
 
+func _cleanup_node(node: Node) -> void:
+	if node == null:
+		return
+	get_root().add_child(node)
+	node.queue_free()
+	await process_frame
+
 func _own_recursive(node: Node, owner: Node) -> void:
 	if node != owner:
 		node.owner = owner
@@ -42,7 +49,7 @@ func _init() -> void:
 
 	var save_error := _save_instantiated_scene(root, edited_path)
 	_require(save_error == OK, "Saving a source USD layer with a generated edit should still complete.")
-	root.free()
+	await _cleanup_node(root)
 
 	var edited_packed_scene: PackedScene = ResourceLoader.load(edited_path, "PackedScene", ResourceLoader.CACHE_MODE_IGNORE)
 	_require(edited_packed_scene != null, "Failed to reload edited USD layer as PackedScene.")
@@ -52,6 +59,6 @@ func _init() -> void:
 	stage_instance.rebuild()
 	_require(stage_instance.get("variants/Model/modelingVariant") == "blue", "Edited USD layer did not preserve the selected variant default.")
 	_require(stage_instance.get_node_for_prim_path("/Model/BlueSphere") != null, "Edited USD layer did not load the selected blue branch.")
-	root.free()
+	await _cleanup_node(root)
 
 	quit(1 if failed else 0)

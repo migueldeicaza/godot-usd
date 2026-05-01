@@ -17,6 +17,13 @@ func _save_instantiated_scene(root: Node, path: String) -> int:
 		return pack_error
 	return ResourceSaver.save(saved_scene, path)
 
+func _cleanup_node(node: Node) -> void:
+	if node == null:
+		return
+	get_root().add_child(node)
+	node.queue_free()
+	await process_frame
+
 func _init() -> void:
 	var flattened_path := "user://variant_flattened.usdz"
 	DirAccess.remove_absolute(ProjectSettings.globalize_path(flattened_path))
@@ -30,7 +37,7 @@ func _init() -> void:
 	stage_instance.set("variants/Model/modelingVariant", "blue")
 
 	_require(_save_instantiated_scene(root, flattened_path) == OK, "Flattened USDZ composed export should save successfully.")
-	root.free()
+	await _cleanup_node(root)
 
 	var flattened_scene: PackedScene = ResourceLoader.load(flattened_path, "PackedScene", ResourceLoader.CACHE_MODE_IGNORE)
 	_require(flattened_scene != null, "Failed to reload flattened USDZ export.")
@@ -38,6 +45,6 @@ func _init() -> void:
 	_require(not root is UsdStageInstance, "Flattened USDZ export should reload as a composed static scene, not a live UsdStageInstance.")
 	_require(root.get_node_or_null("Model/BlueSphere") != null, "Flattened USDZ export should contain the selected composed branch.")
 	_require(root.get_node_or_null("Model/RedCube") == null, "Flattened USDZ export should not contain inactive variant branches.")
-	root.free()
+	await _cleanup_node(root)
 
 	quit(1 if failed else 0)

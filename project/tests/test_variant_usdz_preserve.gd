@@ -17,6 +17,13 @@ func _save_instantiated_scene(root: Node, path: String) -> int:
 		return pack_error
 	return ResourceSaver.save(saved_scene, path)
 
+func _cleanup_node(node: Node) -> void:
+	if node == null:
+		return
+	get_root().add_child(node)
+	node.queue_free()
+	await process_frame
+
 func _read_zip_root(path: String) -> Dictionary:
 	var zip := ZIPReader.new()
 	_require(zip.open(path) == OK, "Failed to open saved USDZ.")
@@ -42,7 +49,7 @@ func _init() -> void:
 	var root := packed_scene.instantiate()
 	_require(root is UsdStageInstance, "Vehicle USDZ did not instantiate as a UsdStageInstance root.")
 	_require(_save_instantiated_scene(root, unchanged_path) == OK, "Saving an unchanged source USDZ scene should preserve the package.")
-	root.free()
+	await _cleanup_node(root)
 
 	var source_size := FileAccess.get_file_as_bytes("res://samples/vehicleVariants.selfcontained.usdz").size()
 	var saved_size := FileAccess.get_file_as_bytes(unchanged_path).size()
@@ -60,7 +67,7 @@ func _init() -> void:
 	_require(root is UsdStageInstance, "Vehicle USDZ did not instantiate as a UsdStageInstance root for edited save.")
 	root.set("variants/vehicleVariant/wheels", "ambulance")
 	_require(_save_instantiated_scene(root, edited_path) == OK, "Edited source USDZ variant save should preserve the package and author the default selection.")
-	root.free()
+	await _cleanup_node(root)
 
 	zip_data = _read_zip_root(edited_path)
 	files = zip_data["files"]
@@ -77,6 +84,6 @@ func _init() -> void:
 	(root as UsdStageInstance).rebuild()
 	_require(root.get_node_for_prim_path("/vehicleVariant/ambulanceFullAsset") != null, "Edited USDZ did not load with ambulance as the default vehicle.")
 	_require(root.get_node_for_prim_path("/vehicleVariant/tractorFullAsset") == null, "Edited USDZ still loaded tractor as the default vehicle.")
-	root.free()
+	await _cleanup_node(root)
 
 	quit(1 if failed else 0)
