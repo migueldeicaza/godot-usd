@@ -43,6 +43,8 @@ class UsdStageInstance : public Node3D {
 	Dictionary runtime_node_overrides;
 	Node *generated_root = nullptr;
 	bool debug_logging = false;
+	bool rebuilt_after_scene_instantiation = false;
+	bool skip_next_runtime_override_capture = false;
 	int debug_rebuild_count = 0;
 	String debug_last_selection_change;
 	String debug_last_rebuild_status;
@@ -50,6 +52,10 @@ class UsdStageInstance : public Node3D {
 
 	void _clear_node_children(Node *p_node);
 	void _clear_generated_children();
+	bool _is_generated_root(Node *p_node) const;
+	void _adopt_existing_generated_root();
+	Node *_get_generated_owner() const;
+	void _mark_generated_tree_owned();
 	Node *_find_node_for_prim_path(Node *p_node, const String &p_prim_path) const;
 	void _append_generated_summary(Node *p_node, PackedStringArray *r_summary, int p_limit) const;
 	String _get_generated_summary() const;
@@ -57,6 +63,7 @@ class UsdStageInstance : public Node3D {
 	bool _get_node3d_runtime_state(Node *p_node, Dictionary *r_state) const;
 	bool _node3d_runtime_state_matches(Node *p_node, const Dictionary &p_state) const;
 	void _collect_runtime_node_baselines(Node *p_node, Dictionary *r_baselines) const;
+	void _capture_runtime_node_overrides();
 	void _refresh_runtime_node_baselines();
 	void _apply_runtime_node_overrides(Node *p_node);
 	bool _parse_variant_property(const String &p_property, String *r_prim_path, String *r_variant_set) const;

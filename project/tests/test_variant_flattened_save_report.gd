@@ -2,6 +2,9 @@ extends SceneTree
 
 var failed := false
 
+func _initialize() -> void:
+	call_deferred("_run_test")
+
 func _fail(message: String) -> void:
 	failed = true
 	push_error(message)
@@ -20,11 +23,18 @@ func _save_instantiated_scene(root: Node, path: String) -> int:
 func _cleanup_node(node: Node) -> void:
 	if node == null:
 		return
-	get_root().add_child(node)
-	node.queue_free()
+	for child in node.get_children(true):
+		if child.name == "_Generated" or child.has_meta("usd_stage_instance_generated"):
+			node.remove_child(child)
+			child.free()
+	if node is UsdStageInstance:
+		(node as UsdStageInstance).stage = null
+	if node.get_parent() != null:
+		node.get_parent().remove_child(node)
+	node.free()
 	await process_frame
 
-func _init() -> void:
+func _run_test() -> void:
 	var flattened_path := "user://variant_flattened.usdz"
 	DirAccess.remove_absolute(ProjectSettings.globalize_path(flattened_path))
 
