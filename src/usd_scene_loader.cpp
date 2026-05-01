@@ -14,6 +14,8 @@
 
 #include <godot_cpp/classes/base_material3d.hpp>
 #include <godot_cpp/classes/array_mesh.hpp>
+#include <godot_cpp/classes/animation.hpp>
+#include <godot_cpp/classes/animation_player.hpp>
 #include <godot_cpp/classes/box_mesh.hpp>
 #include <godot_cpp/classes/camera3d.hpp>
 #include <godot_cpp/classes/capsule_mesh.hpp>
@@ -415,10 +417,255 @@ bool node_tree_has_usd_composition_boundaries(Node *p_node) {
 	return false;
 }
 
+bool node_tree_has_source_aware_skeleton_data(Node *p_node) {
+	ERR_FAIL_NULL_V(p_node, false);
+
+	const Dictionary metadata = get_usd_metadata(p_node);
+	if (Object::cast_to<Skeleton3D>(p_node) != nullptr && metadata.has("usd:prim_path")) {
+		return true;
+	}
+	if (Object::cast_to<AnimationPlayer>(p_node) != nullptr) {
+		const AnimationPlayer *player = Object::cast_to<AnimationPlayer>(p_node);
+		const PackedStringArray animation_names = player->get_animation_list();
+		for (int i = 0; i < animation_names.size(); i++) {
+			const Ref<Animation> animation = player->get_animation(StringName(animation_names[i]));
+			if (animation.is_valid() && get_usd_metadata(animation.ptr()).has("usd:animation_prim_path")) {
+				return true;
+			}
+		}
+	}
+
+	for (int i = 0; i < p_node->get_child_count(false); i++) {
+		if (node_tree_has_source_aware_skeleton_data(p_node->get_child(i, false))) {
+			return true;
+		}
+	}
+
+	return false;
+}
+
 String get_imported_static_scene_source_path(Node *p_root) {
 	ERR_FAIL_NULL_V(p_root, String());
 	const Dictionary metadata = get_usd_metadata(p_root);
 	return metadata.get("usd:source_path", String());
+}
+
+GfMatrix4d transform_to_gf_matrix(const Transform3D &p_transform) {
+	GfMatrix4d matrix(1.0);
+	const Vector3 x_axis = p_transform.basis.get_column(0);
+	const Vector3 y_axis = p_transform.basis.get_column(1);
+	const Vector3 z_axis = p_transform.basis.get_column(2);
+	matrix[0][0] = x_axis.x;
+	matrix[0][1] = x_axis.y;
+	matrix[0][2] = x_axis.z;
+	matrix[1][0] = y_axis.x;
+	matrix[1][1] = y_axis.y;
+	matrix[1][2] = y_axis.z;
+	matrix[2][0] = z_axis.x;
+	matrix[2][1] = z_axis.y;
+	matrix[2][2] = z_axis.z;
+	matrix[3][0] = p_transform.origin.x;
+	matrix[3][1] = p_transform.origin.y;
+	matrix[3][2] = p_transform.origin.z;
+	return matrix;
+}
+
+GfQuatf godot_quat_to_gf_quat(const Quaternion &p_quaternion) {
+	return GfQuatf((float)p_quaternion.w, GfVec3f((float)p_quaternion.x, (float)p_quaternion.y, (float)p_quaternion.z));
+}
+
+bool gf_matrix_is_equal_approx(const GfMatrix4d &p_left, const GfMatrix4d &p_right) {
+	for (int row = 0; row < 4; row++) {
+		for (int column = 0; column < 4; column++) {
+			if (!Math::is_equal_approx((real_t)p_left[row][column], (real_t)p_right[row][column])) {
+				return false;
+			}
+		}
+	}
+	return true;
+}
+
+bool gf_quat_is_equal_approx(const GfQuatf &p_left, const GfQuatf &p_right) {
+	if (!Math::is_equal_approx((real_t)p_left.GetReal(), (real_t)p_right.GetReal())) {
+		return false;
+	}
+	const GfVec3f left_imaginary = p_left.GetImaginary();
+	const GfVec3f right_imaginary = p_right.GetImaginary();
+	for (int i = 0; i < 3; i++) {
+		if (!Math::is_equal_approx((real_t)left_imaginary[i], (real_t)right_imaginary[i])) {
+			return false;
+		}
+	}
+	return true;
+}
+
+String node_path_bone_name(const NodePath &p_path) {
+	const String path_string = String(p_path);
+	const int colon = path_string.rfind(":");
+	if (colon < 0 || colon + 1 >= path_string.length()) {
+		return String();
+	}
+	return path_string.substr(colon + 1);
+}
+
+String joint_leaf_name_for_save(const String &p_joint_path) {
+	const int slash = p_joint_path.rfind("/");
+	if (slash < 0 || slash + 1 >= p_joint_path.length()) {
+		return p_joint_path;
+	}
+	return p_joint_path.substr(slash + 1);
+}
+
+bool apply_skeleton_rest_edits_to_stage(Node *p_node, const UsdStageRefPtr &p_stage) {
+	ERR_FAIL_NULL_V(p_node, false);
+	ERR_FAIL_COND_V(!p_stage, false);
+
+	bool applied_any = false;
+	if (Skeleton3D *skeleton = Object::cast_to<Skeleton3D>(p_node)) {
+		const Dictionary metadata = get_usd_metadata(skeleton);
+		const String prim_path = metadata.get("usd:prim_path", String());
+		if (!prim_path.is_empty()) {
+			const UsdPrim prim = p_stage->GetPrimAtPath(SdfPath(prim_path.utf8().get_data()));
+			UsdSkelSkeleton usd_skeleton(prim);
+			if (usd_skeleton) {
+				VtArray<TfToken> joints;
+				if (usd_skeleton.GetJointsAttr().Get(&joints) && !joints.empty()) {
+					VtArray<GfMatrix4d> rest_transforms;
+					if (!usd_skeleton.GetRestTransformsAttr().Get(&rest_transforms) || rest_transforms.size() != joints.size()) {
+						rest_transforms.resize(joints.size());
+					}
+					bool changed = false;
+					for (int bone_index = 0; bone_index < skeleton->get_bone_count(); bone_index++) {
+						int joint_index = bone_index;
+						if (skeleton->has_bone_meta(bone_index, StringName("usd_joint_index"))) {
+							joint_index = (int)skeleton->get_bone_meta(bone_index, StringName("usd_joint_index"));
+						}
+						if (joint_index < 0 || joint_index >= (int)joints.size()) {
+							continue;
+						}
+						const GfMatrix4d edited_rest_transform = transform_to_gf_matrix(skeleton->get_bone_rest(bone_index));
+						if (!gf_matrix_is_equal_approx(rest_transforms[joint_index], edited_rest_transform)) {
+							rest_transforms[joint_index] = edited_rest_transform;
+							changed = true;
+						}
+					}
+					if (changed) {
+						usd_skeleton.GetRestTransformsAttr().Set(rest_transforms);
+						applied_any = true;
+					}
+				}
+			}
+		}
+	}
+
+	for (int i = 0; i < p_node->get_child_count(false); i++) {
+		applied_any = apply_skeleton_rest_edits_to_stage(p_node->get_child(i, false), p_stage) || applied_any;
+	}
+
+	return applied_any;
+}
+
+bool apply_animation_rotation_edits_to_stage(Node *p_node, const UsdStageRefPtr &p_stage) {
+	ERR_FAIL_NULL_V(p_node, false);
+	ERR_FAIL_COND_V(!p_stage, false);
+
+	bool applied_any = false;
+	if (AnimationPlayer *player = Object::cast_to<AnimationPlayer>(p_node)) {
+		const PackedStringArray animation_names = player->get_animation_list();
+		for (int animation_index = 0; animation_index < animation_names.size(); animation_index++) {
+			const Ref<Animation> animation = player->get_animation(StringName(animation_names[animation_index]));
+			if (animation.is_null()) {
+				continue;
+			}
+
+			const Dictionary metadata = get_usd_metadata(animation.ptr());
+			const String animation_prim_path = metadata.get("usd:animation_prim_path", String());
+			const Array joint_paths = metadata.get("usd:joint_paths", Array());
+			if (animation_prim_path.is_empty() || joint_paths.is_empty()) {
+				continue;
+			}
+
+			UsdSkelAnimation usd_animation(p_stage->GetPrimAtPath(SdfPath(animation_prim_path.utf8().get_data())));
+			if (!usd_animation) {
+				continue;
+			}
+
+			UsdAttribute rotations_attr = usd_animation.GetRotationsAttr();
+			if (!rotations_attr) {
+				continue;
+			}
+
+			std::unordered_map<std::string, int> joint_index_by_bone_name;
+			for (int joint_index = 0; joint_index < joint_paths.size(); joint_index++) {
+				const String joint_path = joint_paths[joint_index];
+				const String bone_name = joint_leaf_name_for_save(joint_path);
+				if (!bone_name.is_empty()) {
+					joint_index_by_bone_name[bone_name.utf8().get_data()] = joint_index;
+				}
+			}
+
+			const double time_codes_per_second = MAX((double)metadata.get("usd:time_codes_per_second", p_stage->GetTimeCodesPerSecond()), 1.0);
+			const double start_time = (double)metadata.get("usd:start_time_code", 0.0);
+			for (int track_index = 0; track_index < animation->get_track_count(); track_index++) {
+				if (animation->track_get_type(track_index) != Animation::TYPE_ROTATION_3D) {
+					continue;
+				}
+
+				const String bone_name = node_path_bone_name(animation->track_get_path(track_index));
+				const auto joint_it = joint_index_by_bone_name.find(bone_name.utf8().get_data());
+				if (joint_it == joint_index_by_bone_name.end()) {
+					continue;
+				}
+				const int joint_index = joint_it->second;
+
+				for (int key_index = 0; key_index < animation->track_get_key_count(track_index); key_index++) {
+					const Variant value = animation->track_get_key_value(track_index, key_index);
+					if (value.get_type() != Variant::QUATERNION) {
+						continue;
+					}
+					const double sample_time = start_time + animation->track_get_key_time(track_index, key_index) * time_codes_per_second;
+					VtArray<GfQuatf> rotations;
+					if (!rotations_attr.Get(&rotations, sample_time) || rotations.size() != (size_t)joint_paths.size()) {
+						continue;
+					}
+					const GfQuatf edited_rotation = godot_quat_to_gf_quat((Quaternion)value);
+					if (!gf_quat_is_equal_approx(rotations[joint_index], edited_rotation)) {
+						rotations[joint_index] = edited_rotation;
+						rotations_attr.Set(rotations, sample_time);
+						applied_any = true;
+					}
+				}
+			}
+		}
+	}
+
+	for (int i = 0; i < p_node->get_child_count(false); i++) {
+		applied_any = apply_animation_rotation_edits_to_stage(p_node->get_child(i, false), p_stage) || applied_any;
+	}
+
+	return applied_any;
+}
+
+Error save_static_imported_skeleton_data_to_source_copy(Node *p_root, const String &p_source_absolute_path, const String &p_destination_absolute_path) {
+	ERR_FAIL_NULL_V(p_root, ERR_INVALID_PARAMETER);
+
+	const Error copy_error = copy_file_absolute_preserving_contents(p_source_absolute_path, p_destination_absolute_path);
+	ERR_FAIL_COND_V_MSG(copy_error != OK, copy_error, vformat("Failed to copy source USD layer for source-aware skeleton save: %s", p_source_absolute_path));
+
+	SdfLayerRefPtr root_layer = SdfLayer::FindOrOpen(p_destination_absolute_path.utf8().get_data());
+	ERR_FAIL_COND_V_MSG(!root_layer, ERR_CANT_OPEN, vformat("Failed to open copied USD layer for source-aware skeleton save: %s", p_destination_absolute_path));
+
+	UsdStageRefPtr stage = UsdStage::Open(root_layer);
+	ERR_FAIL_COND_V_MSG(!stage, ERR_CANT_OPEN, vformat("Failed to compose copied USD layer for source-aware skeleton save: %s", p_destination_absolute_path));
+
+	stage->SetEditTarget(root_layer);
+	const bool applied_skeleton_edits = apply_skeleton_rest_edits_to_stage(p_root, stage);
+	const bool applied_animation_edits = apply_animation_rotation_edits_to_stage(p_root, stage);
+	if (!applied_skeleton_edits && !applied_animation_edits) {
+		return OK;
+	}
+
+	return root_layer->Save() ? OK : ERR_CANT_CREATE;
 }
 
 void reapply_composition_arcs(const UsdPrim &p_prim, const Object *p_source_object) {
@@ -2938,6 +3185,15 @@ Error UsdSceneFormatSaver::_save(const Ref<Resource> &p_resource, const String &
 			}
 
 			if (is_usd_scene_extension(destination_extension) && destination_extension == source_extension) {
+				if (destination_extension != "usdz" && node_tree_has_source_aware_skeleton_data(root)) {
+					const Error save_error = save_static_imported_skeleton_data_to_source_copy(root, source_absolute_path, destination_absolute_path);
+					if (save_error == OK) {
+						report_usd_save_mode(vformat("preserved static imported USD source while merging skeleton and animation edits: %s -> %s", static_source_path, p_path));
+					}
+					free_saver_root(root);
+					return save_error;
+				}
+
 				const Error copy_error = copy_file_absolute_preserving_contents(source_absolute_path, destination_absolute_path);
 				if (copy_error == OK) {
 					report_usd_save_mode(vformat("preserved static imported USD source unchanged: %s -> %s", static_source_path, p_path));

@@ -32,6 +32,7 @@ const TESTS := [
 	"test_skel_animation_sparsity.gd",
 	"test_skeleton_basic.gd",
 	"test_skeleton_roundtrip_save.gd",
+	"test_source_aware_skeleton_animation_save.gd",
 	"test_skinning_basic.gd",
 	"test_skip_preview_lighting_save.gd",
 	"test_sparse_material_subset_roundtrip.gd",
