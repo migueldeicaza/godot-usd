@@ -61,6 +61,7 @@
 #include <pxr/base/gf/quatf.h>
 #include <pxr/base/gf/vec3d.h>
 #include <pxr/base/gf/vec3f.h>
+#include <pxr/base/gf/vec3h.h>
 #include <pxr/base/tf/stringUtils.h>
 #include <pxr/base/tf/token.h>
 #include <pxr/usd/sdf/layer.h>
@@ -499,6 +500,32 @@ bool gf_quat_is_equal_approx(const GfQuatf &p_left, const GfQuatf &p_right) {
 	return true;
 }
 
+bool gf_vec3f_is_equal_approx(const GfVec3f &p_left, const GfVec3f &p_right) {
+	for (int i = 0; i < 3; i++) {
+		if (!Math::is_equal_approx((real_t)p_left[i], (real_t)p_right[i])) {
+			return false;
+		}
+	}
+	return true;
+}
+
+bool gf_vec3h_is_equal_approx(const GfVec3h &p_left, const GfVec3h &p_right) {
+	for (int i = 0; i < 3; i++) {
+		if (!Math::is_equal_approx((real_t)p_left[i], (real_t)p_right[i])) {
+			return false;
+		}
+	}
+	return true;
+}
+
+GfVec3f godot_vector_to_gf_vec3f(const Vector3 &p_vector) {
+	return GfVec3f((float)p_vector.x, (float)p_vector.y, (float)p_vector.z);
+}
+
+GfVec3h godot_vector_to_gf_vec3h(const Vector3 &p_vector) {
+	return GfVec3h((float)p_vector.x, (float)p_vector.y, (float)p_vector.z);
+}
+
 String node_path_bone_name(const NodePath &p_path) {
 	const String path_string = String(p_path);
 	const int colon = path_string.rfind(":");
@@ -514,6 +541,15 @@ String joint_leaf_name_for_save(const String &p_joint_path) {
 		return p_joint_path;
 	}
 	return p_joint_path.substr(slash + 1);
+}
+
+String node_path_property_name(const NodePath &p_path) {
+	const String path_string = String(p_path);
+	const int colon = path_string.rfind(":");
+	if (colon < 0 || colon + 1 >= path_string.length()) {
+		return String();
+	}
+	return path_string.substr(colon + 1);
 }
 
 bool apply_skeleton_rest_edits_to_stage(Node *p_node, const UsdStageRefPtr &p_stage) {
@@ -565,7 +601,7 @@ bool apply_skeleton_rest_edits_to_stage(Node *p_node, const UsdStageRefPtr &p_st
 	return applied_any;
 }
 
-bool apply_animation_rotation_edits_to_stage(Node *p_node, const UsdStageRefPtr &p_stage) {
+bool apply_animation_edits_to_stage(Node *p_node, const UsdStageRefPtr &p_stage) {
 	ERR_FAIL_NULL_V(p_node, false);
 	ERR_FAIL_COND_V(!p_stage, false);
 
@@ -590,10 +626,10 @@ bool apply_animation_rotation_edits_to_stage(Node *p_node, const UsdStageRefPtr 
 				continue;
 			}
 
+			UsdAttribute translations_attr = usd_animation.GetTranslationsAttr();
 			UsdAttribute rotations_attr = usd_animation.GetRotationsAttr();
-			if (!rotations_attr) {
-				continue;
-			}
+			UsdAttribute scales_attr = usd_animation.GetScalesAttr();
+			UsdAttribute blend_shape_weights_attr = usd_animation.GetBlendShapeWeightsAttr();
 
 			std::unordered_map<std::string, int> joint_index_by_bone_name;
 			for (int joint_index = 0; joint_index < joint_paths.size(); joint_index++) {
@@ -607,7 +643,37 @@ bool apply_animation_rotation_edits_to_stage(Node *p_node, const UsdStageRefPtr 
 			const double time_codes_per_second = MAX((double)metadata.get("usd:time_codes_per_second", p_stage->GetTimeCodesPerSecond()), 1.0);
 			const double start_time = (double)metadata.get("usd:start_time_code", 0.0);
 			for (int track_index = 0; track_index < animation->get_track_count(); track_index++) {
-				if (animation->track_get_type(track_index) != Animation::TYPE_ROTATION_3D) {
+				if (animation->track_get_type(track_index) == Animation::TYPE_BLEND_SHAPE) {
+					const Array blend_shape_names = metadata.get("usd:blend_shape_names", Array());
+					const String blend_shape_name = node_path_property_name(animation->track_get_path(track_index));
+					int blend_shape_index = -1;
+					for (int i = 0; i < blend_shape_names.size(); i++) {
+						if ((String)blend_shape_names[i] == blend_shape_name) {
+							blend_shape_index = i;
+							break;
+						}
+					}
+					if (blend_shape_index < 0 || !blend_shape_weights_attr) {
+						continue;
+					}
+
+					for (int key_index = 0; key_index < animation->track_get_key_count(track_index); key_index++) {
+						const Variant value = animation->track_get_key_value(track_index, key_index);
+						if (value.get_type() != Variant::FLOAT && value.get_type() != Variant::INT) {
+							continue;
+						}
+						const double sample_time = start_time + animation->track_get_key_time(track_index, key_index) * time_codes_per_second;
+						VtArray<float> blend_shape_weights;
+						if (!blend_shape_weights_attr.Get(&blend_shape_weights, sample_time) || blend_shape_weights.size() != (size_t)blend_shape_names.size()) {
+							continue;
+						}
+						const float edited_weight = (float)value;
+						if (!Math::is_equal_approx((real_t)blend_shape_weights[blend_shape_index], (real_t)edited_weight)) {
+							blend_shape_weights[blend_shape_index] = edited_weight;
+							blend_shape_weights_attr.Set(blend_shape_weights, sample_time);
+							applied_any = true;
+						}
+					}
 					continue;
 				}
 
@@ -620,19 +686,41 @@ bool apply_animation_rotation_edits_to_stage(Node *p_node, const UsdStageRefPtr 
 
 				for (int key_index = 0; key_index < animation->track_get_key_count(track_index); key_index++) {
 					const Variant value = animation->track_get_key_value(track_index, key_index);
-					if (value.get_type() != Variant::QUATERNION) {
-						continue;
-					}
 					const double sample_time = start_time + animation->track_get_key_time(track_index, key_index) * time_codes_per_second;
-					VtArray<GfQuatf> rotations;
-					if (!rotations_attr.Get(&rotations, sample_time) || rotations.size() != (size_t)joint_paths.size()) {
-						continue;
-					}
-					const GfQuatf edited_rotation = godot_quat_to_gf_quat((Quaternion)value);
-					if (!gf_quat_is_equal_approx(rotations[joint_index], edited_rotation)) {
-						rotations[joint_index] = edited_rotation;
-						rotations_attr.Set(rotations, sample_time);
-						applied_any = true;
+
+					if (animation->track_get_type(track_index) == Animation::TYPE_POSITION_3D && translations_attr && value.get_type() == Variant::VECTOR3) {
+						VtArray<GfVec3f> translations;
+						if (!translations_attr.Get(&translations, sample_time) || translations.size() != (size_t)joint_paths.size()) {
+							continue;
+						}
+						const GfVec3f edited_translation = godot_vector_to_gf_vec3f((Vector3)value);
+						if (!gf_vec3f_is_equal_approx(translations[joint_index], edited_translation)) {
+							translations[joint_index] = edited_translation;
+							translations_attr.Set(translations, sample_time);
+							applied_any = true;
+						}
+					} else if (animation->track_get_type(track_index) == Animation::TYPE_ROTATION_3D && rotations_attr && value.get_type() == Variant::QUATERNION) {
+						VtArray<GfQuatf> rotations;
+						if (!rotations_attr.Get(&rotations, sample_time) || rotations.size() != (size_t)joint_paths.size()) {
+							continue;
+						}
+						const GfQuatf edited_rotation = godot_quat_to_gf_quat((Quaternion)value);
+						if (!gf_quat_is_equal_approx(rotations[joint_index], edited_rotation)) {
+							rotations[joint_index] = edited_rotation;
+							rotations_attr.Set(rotations, sample_time);
+							applied_any = true;
+						}
+					} else if (animation->track_get_type(track_index) == Animation::TYPE_SCALE_3D && scales_attr && value.get_type() == Variant::VECTOR3) {
+						VtArray<GfVec3h> scales;
+						if (!scales_attr.Get(&scales, sample_time) || scales.size() != (size_t)joint_paths.size()) {
+							continue;
+						}
+						const GfVec3h edited_scale = godot_vector_to_gf_vec3h((Vector3)value);
+						if (!gf_vec3h_is_equal_approx(scales[joint_index], edited_scale)) {
+							scales[joint_index] = edited_scale;
+							scales_attr.Set(scales, sample_time);
+							applied_any = true;
+						}
 					}
 				}
 			}
@@ -640,7 +728,7 @@ bool apply_animation_rotation_edits_to_stage(Node *p_node, const UsdStageRefPtr 
 	}
 
 	for (int i = 0; i < p_node->get_child_count(false); i++) {
-		applied_any = apply_animation_rotation_edits_to_stage(p_node->get_child(i, false), p_stage) || applied_any;
+		applied_any = apply_animation_edits_to_stage(p_node->get_child(i, false), p_stage) || applied_any;
 	}
 
 	return applied_any;
@@ -660,7 +748,7 @@ Error save_static_imported_skeleton_data_to_source_copy(Node *p_root, const Stri
 
 	stage->SetEditTarget(root_layer);
 	const bool applied_skeleton_edits = apply_skeleton_rest_edits_to_stage(p_root, stage);
-	const bool applied_animation_edits = apply_animation_rotation_edits_to_stage(p_root, stage);
+	const bool applied_animation_edits = apply_animation_edits_to_stage(p_root, stage);
 	if (!applied_skeleton_edits && !applied_animation_edits) {
 		return OK;
 	}
