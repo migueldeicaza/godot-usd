@@ -16,10 +16,9 @@ func _run() -> void:
 
     var root := (packed as PackedScene).instantiate()
     get_root().add_child(root)
-    var generated_root := root.get_child(0)
-    if not _require(generated_root.get_child_count() >= 1, "Missing generated root for composition payload scene", old_value):
+    var payload_node := _find_prim_node(root, "/Root/PayloadCar")
+    if not _require(payload_node != null, "Missing /Root/PayloadCar for composition payload scene", old_value):
         return
-    var payload_node := generated_root.get_child(0).get_child(0)
     var metadata := payload_node.get_meta("usd", {}) as Dictionary
     if not _require(String(metadata.get("usd:composition_preservation_mode", "")) == "read_only", "Payload composition mode mismatch", old_value):
         return
@@ -63,3 +62,14 @@ func _fail(message: String, old_value: Variant) -> void:
     push_error(message)
     ProjectSettings.set_setting(SETTING, old_value)
     quit(1)
+
+func _find_prim_node(node: Node, prim_path: String) -> Node:
+    if node.has_meta("usd"):
+        var meta := node.get_meta("usd", {}) as Dictionary
+        if meta.get("usd:prim_path", "") == prim_path:
+            return node
+    for child in node.get_children():
+        var found := _find_prim_node(child, prim_path)
+        if found != null:
+            return found
+    return null

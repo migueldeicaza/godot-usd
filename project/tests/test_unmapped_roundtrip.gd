@@ -26,13 +26,10 @@ func _run() -> void:
 
     var root := (reloaded as PackedScene).instantiate()
     get_root().add_child(root)
-    if not _require(root.get_child_count() == 1, "Unexpected root child count for unmapped round-trip scene", old_value):
-        return
 
-    var generated_root := root.get_child(0)
-    if not _require(generated_root.get_child_count() >= 1, "Missing generated USD root child", old_value):
+    var usd_root := _find_prim_node(root, "/Root")
+    if not _require(usd_root != null, "Missing /Root after unmapped round-trip reload", old_value):
         return
-    var usd_root := generated_root.get_child(0)
     var metadata := usd_root.get_meta("usd", {}) as Dictionary
     var unmapped_attributes := metadata.get("usd:unmapped_attributes", {}) as Dictionary
     if not _require(unmapped_attributes.has("debugLabel"), "Missing debugLabel unmapped attribute", old_value):
@@ -90,3 +87,14 @@ func _fail(message: String, old_value: Variant) -> void:
     push_error(message)
     ProjectSettings.set_setting(SETTING, old_value)
     quit(1)
+
+func _find_prim_node(node: Node, prim_path: String) -> Node:
+    if node.has_meta("usd"):
+        var meta := node.get_meta("usd", {}) as Dictionary
+        if meta.get("usd:prim_path", "") == prim_path:
+            return node
+    for child in node.get_children():
+        var found := _find_prim_node(child, prim_path)
+        if found != null:
+            return found
+    return null

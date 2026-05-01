@@ -6,7 +6,7 @@ Current scope:
 
 - registers `UsdStageResource` and `UsdStageInstance`
 - registers a runtime `ResourceFormatLoader` for `.usd`, `.usda`, `.usdc`, `.usdz`
-- registers a stub `ResourceFormatSaver`
+- registers a `ResourceFormatSaver` with authored-scene, composed-stage, static-source-preserving, composition-preserving, and source-preserving variant save paths
 - registers an editor `EditorSceneFormatImporter` through an `EditorPlugin`
 - ports a first-pass USD scene builder:
   - hierarchy
@@ -21,7 +21,9 @@ Current scope:
   - packaged USDZ texture assets for supported image formats
   - primitive meshes
   - cameras
-  - distant and sphere lights
+  - distant, sphere, cylinder, rectangular, and disk light schemas
+  - curves, skeletons, skinning, blend shapes, and animation import coverage used by the current probes
+  - baseline USDA save/load for authored scenes, primitive meshes, ArrayMesh, preview materials, texture networks, subsets, and variant-preserving source saves
 
 Build:
 
@@ -45,8 +47,16 @@ Smoke test:
 /path/to/godot --headless --path project --script res://test_load.gd
 ```
 
+Regression tests:
+
+```bash
+/path/to/godot --headless --path project --script res://tests/run_all.gd
+```
+
+The current regression manifest runs 36 isolated scripts and passes locally with the debug macOS arm64 build.
+
 Known gaps:
 
-- USD save/export is stubbed
-- the editor importer currently bakes through `UsdStageInstance`, not a direct port of the in-tree importer
-- skeletons, blend shapes, animation, and USDZ save/repack support are not ported yet
+- save/export is not yet full module parity for every edit-aware scene case
+- broader runtime mesh/material edge cases still need audit against `modules/usd/tests`
+- packaging docs still need exact supported Godot, `godot-cpp`, OpenUSD, and TBB version notes

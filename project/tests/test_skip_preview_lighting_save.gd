@@ -27,11 +27,8 @@ func _run() -> void:
 
     var root := (reloaded as PackedScene).instantiate()
     get_root().add_child(root)
-    if not _require(root.get_child_count() == 1, "Unexpected root child count for preview-lighting reload", 0):
-        return
 
-    var generated_root := root.get_child(0)
-    var root_metadata := generated_root.get_meta("usd", {}) as Dictionary
+    var root_metadata := root.get_meta("usd", {}) as Dictionary
     if not _require(not bool(root_metadata.get("usd:has_authored_lights", true)), "Reloaded stage should report no authored lights", 0):
         return
     if not _require(not bool(root_metadata.get("usd:has_preview_lighting", true)), "Reloaded stage should not report preview lighting after save", 0):

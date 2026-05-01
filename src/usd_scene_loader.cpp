@@ -415,6 +415,12 @@ bool node_tree_has_usd_composition_boundaries(Node *p_node) {
 	return false;
 }
 
+String get_imported_static_scene_source_path(Node *p_root) {
+	ERR_FAIL_NULL_V(p_root, String());
+	const Dictionary metadata = get_usd_metadata(p_root);
+	return metadata.get("usd:source_path", String());
+}
+
 void reapply_composition_arcs(const UsdPrim &p_prim, const Object *p_source_object) {
 	ERR_FAIL_NULL(p_source_object);
 	if (!p_prim) {
@@ -2910,6 +2916,42 @@ Error UsdSceneFormatSaver::_save(const Ref<Resource> &p_resource, const String &
 
 	UsdStageInstance *stage_instance = Object::cast_to<UsdStageInstance>(root);
 	if (stage_instance == nullptr) {
+		const String static_source_path = get_imported_static_scene_source_path(root);
+		if (!static_source_path.is_empty()) {
+			const String destination_extension = p_path.get_extension().to_lower();
+			const String source_absolute_path = get_absolute_path(static_source_path);
+			const String source_extension = source_absolute_path.get_extension().to_lower();
+			const String destination_absolute_path = get_absolute_path(p_path);
+			const bool has_composition_boundaries = node_tree_has_usd_composition_boundaries(root);
+
+			if (has_composition_boundaries) {
+				UsdStageRefPtr source_stage = open_stage_for_instance(static_source_path);
+				if (!source_stage) {
+					free_saver_root(root);
+					return ERR_CANT_OPEN;
+				}
+
+				report_usd_save_mode(vformat("exporting static imported USD scene to %s while reauthoring preserved read-only composition arcs from %s.", p_path, static_source_path));
+				const Error save_error = save_composition_preserving_generated_scene(root, p_path, source_stage);
+				free_saver_root(root);
+				return save_error;
+			}
+
+			if (is_usd_scene_extension(destination_extension) && destination_extension == source_extension) {
+				const Error copy_error = copy_file_absolute_preserving_contents(source_absolute_path, destination_absolute_path);
+				if (copy_error == OK) {
+					report_usd_save_mode(vformat("preserved static imported USD source unchanged: %s -> %s", static_source_path, p_path));
+				}
+				free_saver_root(root);
+				return copy_error;
+			}
+
+			report_usd_save_mode(vformat("exporting composed static imported USD scene to %s from source %s.", p_path, static_source_path));
+			const Error save_error = save_composed_usd_stage_to_path(static_source_path, Dictionary(), p_path);
+			free_saver_root(root);
+			return save_error;
+		}
+
 		const bool has_composition_boundaries = node_tree_has_usd_composition_boundaries(root);
 		if (p_path.get_extension().to_lower() == "usdz") {
 			report_usd_save_mode(vformat("packaging composed Godot scene as USDZ at %s; preserved read-only composition arcs stored on nodes are reauthored, but original package contents, inactive variant branches, and unsupported arcs are not preserved by this path.", p_path), has_composition_boundaries);
