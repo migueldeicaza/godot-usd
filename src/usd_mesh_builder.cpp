@@ -64,8 +64,12 @@ struct SurfaceAccumulator {
 	Ref<Material> material;
 	String usd_material_path;
 	String binding_kind;
+	bool has_material_binding = false;
 	String subset_path;
 	String subset_name;
+	String family_name;
+	String family_type;
+	PackedInt32Array authored_face_indices;
 	PackedInt32Array authored_point_indices;
 };
 
@@ -632,10 +636,13 @@ MeshBuildResult build_polygon_mesh(const UsdStageRefPtr &p_stage, const UsdTimeC
 	surfaces[0].skin_weight_count = skin_weight_count > 0 ? skin_weight_count : 4;
 
 	UsdShadeMaterialBindingAPI mesh_binding_api(p_mesh.GetPrim());
+	const UsdRelationship mesh_binding_relationship = p_mesh.GetPrim().GetRelationship(TfToken("material:binding"));
+	const bool mesh_has_authored_binding = mesh_binding_relationship && mesh_binding_relationship.HasAuthoredTargets();
 	UsdShadeMaterial default_material = mesh_binding_api.ComputeBoundMaterial();
 	if (default_material) {
 		surfaces[0].material = build_material_from_usd_material(p_stage, p_time, default_material, r_mapping_notes);
 		surfaces[0].usd_material_path = to_godot_string(default_material.GetPath().GetString());
+		surfaces[0].has_material_binding = mesh_has_authored_binding;
 	}
 
 	std::vector<int> face_to_surface(face_vertex_counts.size(), 0);
@@ -651,11 +658,20 @@ MeshBuildResult build_polygon_mesh(const UsdStageRefPtr &p_stage, const UsdTimeC
 		subset_surface.skin_weight_count = skin_weight_count > 0 ? skin_weight_count : 4;
 		subset_surface.subset_path = to_godot_string(subset.GetPath().GetString());
 		subset_surface.subset_name = to_godot_string(subset.GetPrim().GetName().GetString());
+		TfToken family_name;
+		subset.GetFamilyNameAttr().Get(&family_name, p_time);
+		subset_surface.family_name = to_godot_string(family_name.GetString());
+		if (!family_name.IsEmpty()) {
+			subset_surface.family_type = to_godot_string(UsdGeomSubset::GetFamilyType(UsdGeomImageable(p_mesh.GetPrim()), family_name).GetString());
+		}
 
+		const UsdRelationship subset_binding_relationship = subset.GetPrim().GetRelationship(TfToken("material:binding"));
+		const bool subset_has_authored_binding = subset_binding_relationship && subset_binding_relationship.HasAuthoredTargets();
 		UsdShadeMaterial subset_material = UsdShadeMaterialBindingAPI(subset.GetPrim()).ComputeBoundMaterial();
-		if (subset_material) {
+		if (subset_material && subset_has_authored_binding) {
 			subset_surface.material = build_material_from_usd_material(p_stage, p_time, subset_material, r_mapping_notes);
 			subset_surface.usd_material_path = to_godot_string(subset_material.GetPath().GetString());
+			subset_surface.has_material_binding = true;
 		} else {
 			subset_surface.material = surfaces[0].material;
 			subset_surface.usd_material_path = surfaces[0].usd_material_path;
@@ -759,6 +775,7 @@ MeshBuildResult build_polygon_mesh(const UsdStageRefPtr &p_stage, const UsdTimeC
 				append_corner(corner, generated_normal);
 				append_corner(corner + 1, generated_normal);
 			}
+			surface.authored_face_indices.push_back(face);
 		}
 		face_vertex_cursor += count;
 	}
@@ -815,20 +832,31 @@ MeshBuildResult build_polygon_mesh(const UsdStageRefPtr &p_stage, const UsdTimeC
 		if (!surface.usd_material_path.is_empty()) {
 			result.material_paths.push_back(surface.usd_material_path);
 		}
-		if (!surface.subset_path.is_empty() || !surface.subset_name.is_empty()) {
-			Dictionary subset_description;
-			subset_description["binding_kind"] = surface.binding_kind;
-			if (!surface.subset_path.is_empty()) {
-				subset_description["subset_path"] = surface.subset_path;
-			}
-			if (!surface.subset_name.is_empty()) {
-				subset_description["subset_name"] = surface.subset_name;
-			}
-			if (!surface.usd_material_path.is_empty()) {
-				subset_description["material_path"] = surface.usd_material_path;
-			}
-			result.material_subsets.push_back(subset_description);
+		Dictionary subset_description;
+		subset_description["binding_kind"] = surface.binding_kind;
+		subset_description["has_material_binding"] = surface.has_material_binding;
+		if (!surface.subset_path.is_empty()) {
+			subset_description["subset_path"] = surface.subset_path;
 		}
+		if (!surface.subset_name.is_empty()) {
+			subset_description["subset_name"] = surface.subset_name;
+		}
+		if (!surface.family_name.is_empty()) {
+			subset_description["family_name"] = surface.family_name;
+		}
+		if (!surface.family_type.is_empty()) {
+			subset_description["family_type"] = surface.family_type;
+		}
+		if (!surface.usd_material_path.is_empty()) {
+			subset_description["material_path"] = surface.usd_material_path;
+		}
+		if (!surface.authored_face_indices.is_empty()) {
+			subset_description["authored_face_indices"] = surface.authored_face_indices;
+		}
+		if (!surface.authored_point_indices.is_empty()) {
+			subset_description["authored_point_indices"] = surface.authored_point_indices;
+		}
+		result.material_subsets.push_back(subset_description);
 	}
 
 	store_blend_shape_metadata(blend_shapes, "array_mesh_relative_piecewise", r_mapping_notes);

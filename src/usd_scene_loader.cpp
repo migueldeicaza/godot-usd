@@ -144,6 +144,36 @@ TfToken make_valid_prim_token(const String &p_name) {
 	return TfToken(make_valid_prim_identifier(p_name).utf8().get_data());
 }
 
+UsdGeomSubset define_preserved_subset(const UsdGeomMesh &p_usd_mesh, const String &p_subset_path, const String &p_subset_name, const TfToken &p_element_type, const VtIntArray &p_indices, const TfToken &p_family_name, const TfToken &p_family_type) {
+	SdfPath subset_path;
+	if (!p_subset_path.is_empty()) {
+		const SdfPath preferred_path(p_subset_path.utf8().get_data());
+		if (preferred_path.IsAbsolutePath() && preferred_path.GetParentPath() == p_usd_mesh.GetPath()) {
+			subset_path = preferred_path;
+		}
+	}
+	if (subset_path.IsEmpty()) {
+		String subset_name = to_godot_string(TfMakeValidIdentifier((p_subset_name.is_empty() ? String("GeomSubset") : p_subset_name).strip_edges().utf8().get_data()));
+		if (subset_name.is_empty()) {
+			subset_name = "GeomSubset";
+		}
+		subset_path = p_usd_mesh.GetPath().AppendChild(TfToken(subset_name.utf8().get_data()));
+	}
+
+	UsdGeomSubset subset = UsdGeomSubset::Define(p_usd_mesh.GetPrim().GetStage(), subset_path);
+	if (!subset) {
+		return UsdGeomSubset();
+	}
+
+	subset.GetElementTypeAttr().Set(p_element_type);
+	subset.GetIndicesAttr().Set(p_indices);
+	if (!p_family_name.IsEmpty()) {
+		subset.CreateFamilyNameAttr().Set(p_family_name);
+		UsdGeomSubset::SetFamilyType(UsdGeomImageable(p_usd_mesh.GetPrim()), p_family_name, p_family_type.IsEmpty() ? UsdGeomTokens->nonOverlapping : p_family_type);
+	}
+	return subset;
+}
+
 void apply_transform_components(const Vector3 &p_origin, const Quaternion &p_rotation, const Vector3 &p_scale, bool p_visible, UsdGeomXformable p_xformable) {
 	if (!p_xformable) {
 		return;
@@ -320,6 +350,24 @@ void write_mesh_material_binding(const UsdStageRefPtr &p_stage, MeshInstance3D *
 		return;
 	}
 
+	const Dictionary usd_metadata = get_usd_metadata(p_mesh_instance);
+	const Array surface_descriptions = usd_metadata.get("usd:material_subsets", Array());
+	const bool has_surface_descriptions = surface_descriptions.size() == mesh->get_surface_count();
+	const auto get_surface_description = [&](int p_surface_index) -> Dictionary {
+		if (!has_surface_descriptions || surface_descriptions[p_surface_index].get_type() != Variant::DICTIONARY) {
+			return Dictionary();
+		}
+		return surface_descriptions[p_surface_index];
+	};
+	const auto make_subset_faces = [&](const UsdMeshSurfaceFaceRange &p_surface_range) -> VtIntArray {
+		VtIntArray subset_faces;
+		subset_faces.reserve(p_surface_range.face_count);
+		for (int face_index = 0; face_index < p_surface_range.face_count; face_index++) {
+			subset_faces.push_back(p_surface_range.face_start + face_index);
+		}
+		return subset_faces;
+	};
+
 	std::unordered_map<uint64_t, UsdShadeMaterial> material_cache;
 	std::unordered_map<std::string, int> material_name_counts;
 	const auto resolve_usd_material = [&](const Ref<Material> &p_material) -> UsdShadeMaterial {
@@ -349,6 +397,70 @@ void write_mesh_material_binding(const UsdStageRefPtr &p_stage, MeshInstance3D *
 		}
 		return UsdShadeMaterial();
 	};
+
+	bool preserve_subset_structure = false;
+	if (has_surface_descriptions) {
+		for (int surface_index = 0; surface_index < surface_descriptions.size(); surface_index++) {
+			const Dictionary description = get_surface_description(surface_index);
+			if ((String)description.get("binding_kind", String()) == String("subset")) {
+				preserve_subset_structure = true;
+				break;
+			}
+		}
+	}
+
+	if (preserve_subset_structure) {
+		UsdShadeMaterialBindingAPI::Apply(p_usd_mesh.GetPrim());
+		for (int surface_index = 0; surface_index < mesh->get_surface_count(); surface_index++) {
+			const UsdMeshSurfaceFaceRange &surface_range = p_surface_face_ranges[surface_index];
+			if (surface_range.face_count <= 0) {
+				continue;
+			}
+
+			const Dictionary description = get_surface_description(surface_index);
+			const String binding_kind = description.get("binding_kind", String("mesh"));
+			const bool has_material_binding = description.get("has_material_binding", true);
+
+			if (binding_kind != "subset") {
+				if (!has_material_binding) {
+					continue;
+				}
+
+				const Ref<Material> surface_material = p_mesh_instance->get_active_material(surface_index);
+				if (surface_material.is_null()) {
+					continue;
+				}
+
+				const UsdShadeMaterial usd_material = resolve_usd_material(surface_material);
+				if (usd_material) {
+					UsdShadeMaterialBindingAPI::Apply(p_usd_mesh.GetPrim()).Bind(usd_material);
+				}
+				continue;
+			}
+
+			const String subset_path_string = description.get("subset_path", String());
+			const String subset_name = description.get("subset_name", vformat("Surface_%d", surface_index));
+			const String family_name_string = description.get("family_name", String("materialBind"));
+			const String family_type_string = description.get("family_type", String("nonOverlapping"));
+			const TfToken family_name = TfToken(family_name_string.utf8().get_data());
+			const TfToken family_type = TfToken(family_type_string.utf8().get_data());
+			UsdGeomSubset subset = define_preserved_subset(p_usd_mesh, subset_path_string, subset_name, UsdGeomTokens->face, make_subset_faces(surface_range), family_name, family_type);
+			if (!subset || !has_material_binding) {
+				continue;
+			}
+
+			const Ref<Material> surface_material = p_mesh_instance->get_active_material(surface_index);
+			if (surface_material.is_null()) {
+				continue;
+			}
+
+			const UsdShadeMaterial usd_material = resolve_usd_material(surface_material);
+			if (usd_material) {
+				UsdShadeMaterialBindingAPI::Apply(subset.GetPrim()).Bind(usd_material);
+			}
+		}
+		return;
+	}
 
 	Ref<Material> shared_material;
 	bool can_use_shared_binding = true;
@@ -389,10 +501,7 @@ void write_mesh_material_binding(const UsdStageRefPtr &p_stage, MeshInstance3D *
 		}
 
 		VtIntArray subset_faces;
-		subset_faces.reserve(surface_range.face_count);
-		for (int face_index = 0; face_index < surface_range.face_count; face_index++) {
-			subset_faces.push_back(surface_range.face_start + face_index);
-		}
+		subset_faces = make_subset_faces(surface_range);
 
 		const String subset_name = vformat("Surface_%d", surface_index);
 		UsdGeomSubset subset = UsdGeomSubset::CreateGeomSubset(p_usd_mesh, TfToken(subset_name.utf8().get_data()), UsdGeomTokens->face, subset_faces, UsdShadeTokens->materialBind, UsdGeomTokens->nonOverlapping);
