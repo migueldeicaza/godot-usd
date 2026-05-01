@@ -29,6 +29,8 @@ void mark_owner_recursive(Node *p_node, Node *p_owner);
 
 Dictionary collect_stage_metadata(const UsdStageRefPtr &p_stage);
 Dictionary collect_variant_sets(const UsdStageRefPtr &p_stage);
+Array collect_variant_context(const Dictionary &p_variant_catalog, const String &p_prim_path);
+void apply_variant_selections_to_stage(const UsdStageRefPtr &p_stage, const Dictionary &p_variant_selections);
 UsdStageRefPtr open_stage_for_instance(const String &p_source_path, const Dictionary &p_variant_selections = Dictionary());
 
 } // namespace godot_usd

@@ -25,5 +25,8 @@ String resolve_asset_path(const UsdStageRefPtr &p_stage, const SdfAssetPath &p_a
 Ref<Image> load_image_from_asset_attribute(const UsdStageRefPtr &p_stage, const UsdTimeCode &p_time, const UsdAttribute &p_asset_attribute, String *r_resolved_path = nullptr);
 Ref<Texture2D> texture_from_image(const Ref<Image> &p_image);
 Ref<Texture2D> load_texture_from_asset_attribute(const UsdStageRefPtr &p_stage, const UsdTimeCode &p_time, const UsdAttribute &p_asset_attribute, String *r_resolved_path = nullptr);
+bool is_safe_usdz_member_path(const String &p_member_path);
+Error extract_usdz_package(const String &p_source_absolute_path, const String &p_destination_directory, String *r_root_layer_path, Vector<String> *r_package_file_paths);
+Error create_usdz_package_from_extracted_files(const String &p_extracted_directory, const Vector<String> &p_package_file_paths, const String &p_root_layer_path, const String &p_package_path);
 
 } // namespace godot_usd

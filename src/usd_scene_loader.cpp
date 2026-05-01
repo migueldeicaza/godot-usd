@@ -59,6 +59,7 @@
 #include <pxr/base/gf/vec3f.h>
 #include <pxr/base/tf/stringUtils.h>
 #include <pxr/base/tf/token.h>
+#include <pxr/usd/sdf/layer.h>
 #include <pxr/usd/sdf/path.h>
 #include <pxr/usd/sdf/payload.h>
 #include <pxr/usd/sdf/reference.h>
@@ -253,6 +254,107 @@ SdfPathVector deserialize_path_array(const Array &p_paths) {
 		}
 	}
 	return paths;
+}
+
+Error copy_file_absolute_preserving_contents(const String &p_source_absolute_path, const String &p_destination_absolute_path) {
+	if (p_source_absolute_path.simplify_path() == p_destination_absolute_path.simplify_path()) {
+		return OK;
+	}
+
+	const Error make_dir_error = DirAccess::make_dir_recursive_absolute(p_destination_absolute_path.get_base_dir());
+	ERR_FAIL_COND_V_MSG(make_dir_error != OK, make_dir_error, vformat("Failed to create destination directory for USD save: %s", p_destination_absolute_path.get_base_dir()));
+
+	return DirAccess::copy_absolute(p_source_absolute_path, p_destination_absolute_path);
+}
+
+bool variant_selections_match_stage_defaults(const Dictionary &p_variant_selections, const Dictionary &p_stage_variant_sets) {
+	const Array prim_keys = p_variant_selections.keys();
+	for (int prim_index = 0; prim_index < prim_keys.size(); prim_index++) {
+		const String prim_path = prim_keys[prim_index];
+		const Variant prim_selections_variant = p_variant_selections[prim_path];
+		if (prim_selections_variant.get_type() != Variant::DICTIONARY) {
+			return false;
+		}
+
+		const Variant prim_variant_sets_variant = p_stage_variant_sets.get(prim_path, Variant());
+		if (prim_variant_sets_variant.get_type() != Variant::DICTIONARY) {
+			return false;
+		}
+
+		const Dictionary prim_selections = prim_selections_variant;
+		const Dictionary prim_variant_sets = prim_variant_sets_variant;
+		const Array set_keys = prim_selections.keys();
+		for (int set_index = 0; set_index < set_keys.size(); set_index++) {
+			const String set_name = set_keys[set_index];
+			const Variant selection = prim_selections[set_name];
+			if (selection.get_type() != Variant::STRING && selection.get_type() != Variant::STRING_NAME) {
+				return false;
+			}
+
+			const Variant set_description_variant = prim_variant_sets.get(set_name, Variant());
+			if (set_description_variant.get_type() != Variant::DICTIONARY) {
+				return false;
+			}
+
+			const Dictionary set_description = set_description_variant;
+			if ((String)set_description.get("selection", String()) != (String)selection) {
+				return false;
+			}
+		}
+	}
+
+	return true;
+}
+
+Error author_variant_selections_in_root_layer(const String &p_root_layer_absolute_path, const Dictionary &p_variant_selections) {
+	if (p_variant_selections.is_empty()) {
+		return OK;
+	}
+
+	SdfLayerRefPtr root_layer = SdfLayer::FindOrOpen(p_root_layer_absolute_path.utf8().get_data());
+	ERR_FAIL_COND_V_MSG(!root_layer, ERR_CANT_OPEN, vformat("Failed to open USD root layer for variant authoring: %s", p_root_layer_absolute_path));
+
+	UsdStageRefPtr stage = UsdStage::Open(root_layer);
+	ERR_FAIL_COND_V_MSG(!stage, ERR_CANT_OPEN, vformat("Failed to compose USD root layer for variant authoring: %s", p_root_layer_absolute_path));
+
+	stage->SetEditTarget(root_layer);
+	apply_variant_selections_to_stage(stage, p_variant_selections);
+
+	return root_layer->Save() ? OK : ERR_CANT_CREATE;
+}
+
+Error save_source_usd_layer_with_variant_defaults(const String &p_source_absolute_path, const String &p_destination_absolute_path, const String &p_destination_file_name, const Dictionary &p_variant_selections) {
+	const String temp_directory = get_absolute_path("user://godot_usd_layer_save");
+	const Error mkdir_error = DirAccess::make_dir_recursive_absolute(temp_directory);
+	ERR_FAIL_COND_V_MSG(mkdir_error != OK, mkdir_error, "Failed to create temporary directory for USD layer save.");
+	const String temp_layer_path = temp_directory.path_join(p_destination_file_name.is_empty() ? ("stage." + p_source_absolute_path.get_extension()) : p_destination_file_name);
+	const Error copy_error = copy_file_absolute_preserving_contents(p_source_absolute_path, temp_layer_path);
+	ERR_FAIL_COND_V_MSG(copy_error != OK, copy_error, vformat("Failed to copy source USD layer for variant save: %s", p_source_absolute_path));
+
+	const Error author_error = author_variant_selections_in_root_layer(temp_layer_path, p_variant_selections);
+	ERR_FAIL_COND_V_MSG(author_error != OK, author_error, vformat("Failed to author USD variant selections into layer: %s", temp_layer_path));
+
+	return copy_file_absolute_preserving_contents(temp_layer_path, p_destination_absolute_path);
+}
+
+Error save_source_usdz_with_variant_defaults(const String &p_source_absolute_path, const String &p_destination_absolute_path, const String &p_destination_file_name, const Dictionary &p_variant_selections) {
+	const String temp_directory = get_absolute_path("user://godot_usdz_save");
+	const Error mkdir_error = DirAccess::make_dir_recursive_absolute(temp_directory);
+	ERR_FAIL_COND_V_MSG(mkdir_error != OK, mkdir_error, "Failed to create temporary directory for USDZ save.");
+	String root_layer_path;
+	Vector<String> package_file_paths;
+	const Error extract_error = extract_usdz_package(p_source_absolute_path, temp_directory, &root_layer_path, &package_file_paths);
+	ERR_FAIL_COND_V_MSG(extract_error != OK, extract_error, vformat("Failed to extract source USDZ package for variant save: %s", p_source_absolute_path));
+
+	const String root_layer_absolute_path = temp_directory.path_join(root_layer_path);
+	const Error author_error = author_variant_selections_in_root_layer(root_layer_absolute_path, p_variant_selections);
+	ERR_FAIL_COND_V_MSG(author_error != OK, author_error, vformat("Failed to author USDZ variant selections into root layer: %s", root_layer_path));
+
+	const String temp_package_path = temp_directory.path_join(p_destination_file_name.is_empty() ? "stage.usdz" : p_destination_file_name);
+	const Error package_error = create_usdz_package_from_extracted_files(temp_directory, package_file_paths, root_layer_path, temp_package_path);
+	ERR_FAIL_COND_V_MSG(package_error != OK, package_error, vformat("Failed to create USDZ package with variant defaults: %s", p_destination_absolute_path));
+
+	return copy_file_absolute_preserving_contents(temp_package_path, p_destination_absolute_path);
 }
 
 bool metadata_has_composition_arcs(const Dictionary &p_metadata) {
@@ -1115,6 +1217,11 @@ class UsdSceneBuilder {
 		if (!local_variant_sets.is_empty()) {
 			metadata["usd:variant_boundary"] = true;
 			metadata["usd:variant_sets"] = local_variant_sets;
+		}
+
+		const Array variant_context = collect_variant_context(variant_catalog, prim_path);
+		if (!variant_context.is_empty()) {
+			metadata["usd:variant_context"] = variant_context;
 		}
 
 		Array applied_schemas;
@@ -2129,13 +2236,41 @@ Error UsdSceneFormatSaver::_save(const Ref<Resource> &p_resource, const String &
 		return ERR_UNAVAILABLE;
 	}
 
+	const String destination_extension = p_path.get_extension().to_lower();
+	const String source_absolute_path = get_absolute_path(stage_resource->get_source_path());
+	const String source_extension = source_absolute_path.get_extension().to_lower();
+	const String destination_absolute_path = get_absolute_path(p_path);
+
+	if (is_usd_scene_extension(destination_extension) && destination_extension == source_extension) {
+		const Dictionary variant_selections = stage_instance->get_variant_selections();
+		const Dictionary stage_variant_sets = stage_resource->get_variant_sets();
+
+		if (variant_selections_match_stage_defaults(variant_selections, stage_variant_sets)) {
+			const Error copy_error = copy_file_absolute_preserving_contents(source_absolute_path, destination_absolute_path);
+			memdelete(root);
+			return copy_error;
+		}
+
+		if (destination_extension == "usdz") {
+			const Error save_error = save_source_usdz_with_variant_defaults(source_absolute_path, destination_absolute_path, p_path.get_file(), variant_selections);
+			memdelete(root);
+			return save_error;
+		}
+
+		if (destination_extension == "usd" || destination_extension == "usda" || destination_extension == "usdc") {
+			const Error save_error = save_source_usd_layer_with_variant_defaults(source_absolute_path, destination_absolute_path, p_path.get_file(), variant_selections);
+			memdelete(root);
+			return save_error;
+		}
+	}
+
 	UsdStageRefPtr stage_ptr = open_stage_for_instance(stage_resource->get_source_path(), stage_instance->get_variant_selections());
 	if (!stage_ptr) {
 		memdelete(root);
 		return ERR_CANT_OPEN;
 	}
 
-	const String absolute_path = get_absolute_path(p_path);
+	const String absolute_path = destination_absolute_path;
 	const String base_dir = absolute_path.get_base_dir();
 	if (!base_dir.is_empty()) {
 		const Error mkdir_error = DirAccess::make_dir_recursive_absolute(base_dir);
@@ -2151,22 +2286,6 @@ Error UsdSceneFormatSaver::_save(const Ref<Resource> &p_resource, const String &
 		const Error save_error = save_composition_preserving_generated_scene(generated_root, p_path, stage_ptr);
 		memdelete(root);
 		return save_error;
-	}
-
-	if (stage_instance->get_variant_selections().is_empty()) {
-		const String source_absolute_path = get_absolute_path(stage_resource->get_source_path());
-		if (!source_absolute_path.is_empty() && FileAccess::file_exists(source_absolute_path)) {
-			Ref<FileAccess> source_file = FileAccess::open(source_absolute_path, FileAccess::READ);
-			if (source_file.is_valid()) {
-				const PackedByteArray source_bytes = source_file->get_buffer(source_file->get_length());
-				Ref<FileAccess> target_file = FileAccess::open(absolute_path, FileAccess::WRITE);
-				if (target_file.is_valid()) {
-					target_file->store_buffer(source_bytes);
-					memdelete(root);
-					return OK;
-				}
-			}
-		}
 	}
 
 	const bool exported = stage_ptr->Export(absolute_path.utf8().get_data(), true);

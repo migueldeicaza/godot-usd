@@ -29,6 +29,13 @@ struct VariantSelectionRequest {
 	int path_depth = 0;
 };
 
+struct VariantContextEntry {
+	String prim_path;
+	String variant_set;
+	String selection;
+	int path_depth = 0;
+};
+
 int get_prim_path_depth(const String &p_prim_path) {
 	int depth = 0;
 	for (int i = 0; i < p_prim_path.length(); i++) {
@@ -37,6 +44,22 @@ int get_prim_path_depth(const String &p_prim_path) {
 		}
 	}
 	return depth;
+}
+
+bool is_prim_path_at_or_under(const String &p_prim_path, const String &p_ancestor_path) {
+	if (p_ancestor_path.is_empty()) {
+		return false;
+	}
+	if (p_ancestor_path == "/") {
+		return p_prim_path.begins_with("/");
+	}
+	if (p_prim_path == p_ancestor_path) {
+		return true;
+	}
+	if (!p_prim_path.begins_with(p_ancestor_path)) {
+		return false;
+	}
+	return p_prim_path.length() > p_ancestor_path.length() && p_prim_path[p_ancestor_path.length()] == '/';
 }
 
 void add_variant_selection_request(std::vector<VariantSelectionRequest> &r_requests, const String &p_prim_path, const String &p_variant_set_name, const String &p_selection) {
@@ -224,6 +247,69 @@ Dictionary collect_variant_sets(const UsdStageRefPtr &p_stage) {
 	}
 
 	return variant_catalog;
+}
+
+Array collect_variant_context(const Dictionary &p_variant_catalog, const String &p_prim_path) {
+	std::vector<VariantContextEntry> context_entries;
+
+	const Array prim_keys = p_variant_catalog.keys();
+	for (int prim_index = 0; prim_index < prim_keys.size(); prim_index++) {
+		const String variant_owner_path = prim_keys[prim_index];
+		const Variant prim_variant_sets_variant = p_variant_catalog[variant_owner_path];
+		if (prim_variant_sets_variant.get_type() != Variant::DICTIONARY) {
+			continue;
+		}
+		if (!is_prim_path_at_or_under(p_prim_path, variant_owner_path)) {
+			continue;
+		}
+
+		const Dictionary prim_variant_sets = prim_variant_sets_variant;
+		const Array set_keys = prim_variant_sets.keys();
+		for (int set_index = 0; set_index < set_keys.size(); set_index++) {
+			const String variant_set = set_keys[set_index];
+			const Variant set_description_variant = prim_variant_sets[variant_set];
+			if (set_description_variant.get_type() != Variant::DICTIONARY) {
+				continue;
+			}
+
+			const Dictionary set_description = set_description_variant;
+			const String selection = set_description.get("selection", String());
+			if (selection.is_empty()) {
+				continue;
+			}
+
+			VariantContextEntry entry;
+			entry.prim_path = variant_owner_path;
+			entry.variant_set = variant_set;
+			entry.selection = selection;
+			entry.path_depth = get_prim_path_depth(variant_owner_path);
+			context_entries.push_back(entry);
+		}
+	}
+
+	std::sort(context_entries.begin(), context_entries.end(), [](const VariantContextEntry &p_left, const VariantContextEntry &p_right) {
+		if (p_left.path_depth != p_right.path_depth) {
+			return p_left.path_depth < p_right.path_depth;
+		}
+		if (p_left.prim_path != p_right.prim_path) {
+			return p_left.prim_path < p_right.prim_path;
+		}
+		return p_left.variant_set < p_right.variant_set;
+	});
+
+	Array context;
+	for (const VariantContextEntry &entry : context_entries) {
+		Dictionary description;
+		description["prim_path"] = entry.prim_path;
+		description["variant_set"] = entry.variant_set;
+		description["selection"] = entry.selection;
+		context.push_back(description);
+	}
+	return context;
+}
+
+void apply_variant_selections_to_stage(const UsdStageRefPtr &p_stage, const Dictionary &p_variant_selections) {
+	apply_variant_selections(p_stage, p_variant_selections);
 }
 
 UsdStageRefPtr open_stage_for_instance(const String &p_source_path, const Dictionary &p_variant_selections) {
