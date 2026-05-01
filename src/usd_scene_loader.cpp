@@ -364,6 +364,21 @@ bool metadata_has_composition_arcs(const Dictionary &p_metadata) {
 			!((Array)p_metadata.get("usd:specializes", Array())).is_empty();
 }
 
+bool usd_metadata_has_preserved_composition_boundary(const Dictionary &p_metadata) {
+	return (bool)p_metadata.get("usd:variant_boundary", false) ||
+			!((Array)p_metadata.get("usd:variant_context", Array())).is_empty() ||
+			metadata_has_composition_arcs(p_metadata);
+}
+
+void report_usd_save_mode(const String &p_message, bool p_warning = false) {
+	const String report = "USD save report: " + p_message;
+	if (p_warning) {
+		UtilityFunctions::push_warning(report);
+	} else {
+		UtilityFunctions::print(report);
+	}
+}
+
 bool node_tree_has_composition_arcs(Node *p_node) {
 	ERR_FAIL_NULL_V(p_node, false);
 	const Dictionary metadata = get_usd_metadata(p_node);
@@ -375,6 +390,26 @@ bool node_tree_has_composition_arcs(Node *p_node) {
 			return true;
 		}
 	}
+	return false;
+}
+
+bool node_tree_has_usd_composition_boundaries(Node *p_node) {
+	ERR_FAIL_NULL_V(p_node, false);
+	if (Object::cast_to<UsdStageInstance>(p_node) != nullptr) {
+		return true;
+	}
+
+	const Dictionary metadata = get_usd_metadata(p_node);
+	if (usd_metadata_has_preserved_composition_boundary(metadata)) {
+		return true;
+	}
+
+	for (int i = 0; i < p_node->get_child_count(); i++) {
+		if (node_tree_has_usd_composition_boundaries(p_node->get_child(i))) {
+			return true;
+		}
+	}
+
 	return false;
 }
 
@@ -469,6 +504,109 @@ void apply_source_prim_transform(const UsdPrim &p_source_prim, UsdPrim p_target_
 	target_xformable.ClearXformOpOrder();
 	target_xformable.AddTransformOp(UsdGeomXformOp::PrecisionDouble).Set(local_matrix);
 }
+
+bool transforms_equal_approx(const Transform3D &p_left, const Transform3D &p_right) {
+	if (!p_left.origin.is_equal_approx(p_right.origin)) {
+		return false;
+	}
+	for (int i = 0; i < 3; i++) {
+		if (!p_left.basis.get_column(i).is_equal_approx(p_right.basis.get_column(i))) {
+			return false;
+		}
+	}
+	return true;
+}
+
+bool generated_node_state_matches(Node *p_current, Node *p_expected, String *r_reason) {
+	ERR_FAIL_NULL_V(p_current, false);
+	ERR_FAIL_NULL_V(p_expected, false);
+
+	if (p_current->get_name() != p_expected->get_name()) {
+		if (r_reason != nullptr) {
+			*r_reason = vformat("name changed from '%s' to '%s'", p_expected->get_name(), p_current->get_name());
+		}
+		return false;
+	}
+
+	if (String(p_current->get_class()) != String(p_expected->get_class())) {
+		if (r_reason != nullptr) {
+			*r_reason = vformat("node type changed from '%s' to '%s'", p_expected->get_class(), p_current->get_class());
+		}
+		return false;
+	}
+
+	Node3D *current_3d = Object::cast_to<Node3D>(p_current);
+	Node3D *expected_3d = Object::cast_to<Node3D>(p_expected);
+	if ((current_3d == nullptr) != (expected_3d == nullptr)) {
+		if (r_reason != nullptr) {
+			*r_reason = "Node3D mapping changed";
+		}
+		return false;
+	}
+	if (current_3d != nullptr && expected_3d != nullptr) {
+		if (!transforms_equal_approx(current_3d->get_transform(), expected_3d->get_transform())) {
+			if (r_reason != nullptr) {
+				*r_reason = "transform changed";
+			}
+			return false;
+		}
+		if (current_3d->is_visible() != expected_3d->is_visible()) {
+			if (r_reason != nullptr) {
+				*r_reason = "visibility changed";
+			}
+			return false;
+		}
+	}
+
+	MeshInstance3D *current_mesh = Object::cast_to<MeshInstance3D>(p_current);
+	MeshInstance3D *expected_mesh = Object::cast_to<MeshInstance3D>(p_expected);
+	if ((current_mesh == nullptr) != (expected_mesh == nullptr)) {
+		if (r_reason != nullptr) {
+			*r_reason = "mesh node mapping changed";
+		}
+		return false;
+	}
+	if (current_mesh != nullptr && expected_mesh != nullptr) {
+		const Ref<Mesh> current_mesh_resource = current_mesh->get_mesh();
+		const Ref<Mesh> expected_mesh_resource = expected_mesh->get_mesh();
+		const int current_surface_count = current_mesh_resource.is_valid() ? current_mesh_resource->get_surface_count() : 0;
+		const int expected_surface_count = expected_mesh_resource.is_valid() ? expected_mesh_resource->get_surface_count() : 0;
+		if (current_surface_count != expected_surface_count) {
+			if (r_reason != nullptr) {
+				*r_reason = "mesh surface count changed";
+			}
+			return false;
+		}
+	}
+
+	return true;
+}
+
+void collect_generated_composition_boundary_nodes(Node *p_node, bool p_under_composition_boundary, std::unordered_map<std::string, Node *> *r_nodes, PackedStringArray *r_unmapped_nodes, int p_unmapped_limit = 12) {
+	ERR_FAIL_NULL(p_node);
+	ERR_FAIL_NULL(r_nodes);
+
+	const Dictionary metadata = get_usd_metadata(p_node);
+	if ((bool)metadata.get("usd:generated_preview", false)) {
+		return;
+	}
+
+	const bool under_composition_boundary = p_under_composition_boundary || usd_metadata_has_preserved_composition_boundary(metadata);
+	const String prim_path = metadata.get("usd:prim_path", String());
+
+	if (under_composition_boundary) {
+		if (!prim_path.is_empty()) {
+			(*r_nodes)[std::string(prim_path.utf8().get_data())] = p_node;
+		} else if (r_unmapped_nodes != nullptr && r_unmapped_nodes->size() < p_unmapped_limit) {
+			r_unmapped_nodes->push_back(String(p_node->get_path()));
+		}
+	}
+
+	for (int i = 0; i < p_node->get_child_count(); i++) {
+		collect_generated_composition_boundary_nodes(p_node->get_child(i), under_composition_boundary, r_nodes, r_unmapped_nodes, p_unmapped_limit);
+	}
+}
+
 
 bool export_composition_preserving_node(Node *p_node, const UsdStageRefPtr &p_stage, const UsdStageRefPtr &p_source_stage) {
 	ERR_FAIL_NULL_V(p_node, false);
@@ -1131,13 +1269,36 @@ Error save_authored_packed_scene_to_stage(const Ref<PackedScene> &p_packed_scene
 
 	const String absolute_path = get_absolute_path(p_path);
 	const String extension = p_path.get_extension().to_lower();
-	if (extension == "usdz") {
-		memdelete(root);
-		UtilityFunctions::push_error("UsdSceneFormatSaver baseline authored-scene export does not support USDZ yet.");
-		return ERR_UNAVAILABLE;
+	const bool package_as_usdz = extension == "usdz";
+	String stage_save_path = absolute_path;
+	String package_directory;
+	String package_root_layer_name;
+	if (package_as_usdz) {
+		package_directory = get_absolute_path("user://godot_usdz_composed_save");
+		const Error mkdir_error = DirAccess::make_dir_recursive_absolute(package_directory);
+		if (mkdir_error != OK) {
+			memdelete(root);
+			return mkdir_error;
+		}
+		package_root_layer_name = p_path.get_file().get_basename() + ".usda";
+		stage_save_path = package_directory.path_join(package_root_layer_name);
 	}
 
-	const String base_dir = absolute_path.get_base_dir();
+	Node *export_root = root;
+	bool export_generated_children_only = false;
+	if (UsdStageInstance *stage_instance = Object::cast_to<UsdStageInstance>(root)) {
+		stage_instance->rebuild();
+		for (int i = 0; i < root->get_child_count(); i++) {
+			Node *child = root->get_child(i);
+			if (child->has_meta(StringName(USD_STAGE_INSTANCE_GENERATED_META))) {
+				export_root = child;
+				export_generated_children_only = true;
+				break;
+			}
+		}
+	}
+
+	const String base_dir = stage_save_path.get_base_dir();
 	if (!base_dir.is_empty()) {
 		const Error mkdir_error = DirAccess::make_dir_recursive_absolute(base_dir);
 		if (mkdir_error != OK) {
@@ -1146,7 +1307,7 @@ Error save_authored_packed_scene_to_stage(const Ref<PackedScene> &p_packed_scene
 		}
 	}
 
-	UsdStageRefPtr stage = UsdStage::CreateNew(absolute_path.utf8().get_data());
+	UsdStageRefPtr stage = UsdStage::CreateNew(stage_save_path.utf8().get_data());
 	if (!stage) {
 		memdelete(root);
 		return ERR_CANT_CREATE;
@@ -1155,31 +1316,56 @@ Error save_authored_packed_scene_to_stage(const Ref<PackedScene> &p_packed_scene
 	UsdGeomSetStageUpAxis(stage, UsdGeomTokens->y);
 	UsdGeomSetStageMetersPerUnit(stage, 1.0);
 
-	String root_name_source = String(root->get_name());
-	if (root_name_source.is_empty()) {
-		root_name_source = "Root";
-	}
-	const String root_name = make_valid_prim_identifier(root_name_source);
-	const SdfPath root_path("/" + std::string(root_name.utf8().get_data()));
-	if (!export_node_to_stage(root, root_path, stage, p_path)) {
-		UsdGeomXform root_xform = UsdGeomXform::Define(stage, root_path);
-		if (Node3D *root_node_3d = Object::cast_to<Node3D>(root)) {
-			apply_node3d_transform(root_node_3d, root_xform);
-		}
-		if (!export_node_children_to_stage(root, root_path, stage, p_path)) {
+	UsdPrim default_prim;
+	if (export_generated_children_only) {
+		if (!export_node_children_to_stage(export_root, SdfPath::AbsoluteRootPath(), stage, stage_save_path)) {
 			memdelete(root);
 			return ERR_CANT_CREATE;
 		}
+		if (export_root->get_child_count() > 0) {
+			const String first_child_name = make_valid_prim_identifier(export_root->get_child(0)->get_name());
+			default_prim = stage->GetPrimAtPath(SdfPath(("/" + std::string(first_child_name.utf8().get_data())).c_str()));
+		}
+	} else {
+		String root_name_source = String(export_root->get_name());
+		if (root_name_source.is_empty()) {
+			root_name_source = "Root";
+		}
+		const String root_name = make_valid_prim_identifier(root_name_source);
+		const SdfPath root_path("/" + std::string(root_name.utf8().get_data()));
+		if (!export_node_to_stage(export_root, root_path, stage, stage_save_path)) {
+			UsdGeomXform root_xform = UsdGeomXform::Define(stage, root_path);
+			if (Node3D *root_node_3d = Object::cast_to<Node3D>(export_root)) {
+				apply_node3d_transform(root_node_3d, root_xform);
+			}
+			if (!export_node_children_to_stage(export_root, root_path, stage, stage_save_path)) {
+				memdelete(root);
+				return ERR_CANT_CREATE;
+			}
+		}
+		default_prim = stage->GetPrimAtPath(root_path);
 	}
 
-	UsdPrim default_prim = stage->GetPrimAtPath(root_path);
 	if (default_prim) {
 		stage->SetDefaultPrim(default_prim);
 	}
 
 	const bool saved = stage->GetRootLayer()->Save();
+	if (!saved) {
+		memdelete(root);
+		return ERR_CANT_CREATE;
+	}
+
+	if (package_as_usdz) {
+		Vector<String> package_file_paths;
+		package_file_paths.push_back(package_root_layer_name);
+		const Error package_error = create_usdz_package_from_extracted_files(package_directory, package_file_paths, package_root_layer_name, absolute_path);
+		memdelete(root);
+		return package_error;
+	}
+
 	memdelete(root);
-	return saved ? OK : ERR_CANT_CREATE;
+	return OK;
 }
 
 class UsdSceneBuilder {
@@ -1690,6 +1876,70 @@ public:
 	}
 };
 
+void warn_source_stage_instance_composition_boundary_edits(Node *p_stage_instance_root, const String &p_source_path, const Dictionary &p_variant_selections) {
+	ERR_FAIL_NULL(p_stage_instance_root);
+
+	Node *generated_root = nullptr;
+	for (int i = 0; i < p_stage_instance_root->get_child_count(); i++) {
+		Node *child = p_stage_instance_root->get_child(i);
+		if (child->has_meta(StringName(USD_STAGE_INSTANCE_GENERATED_META))) {
+			generated_root = child;
+			break;
+		}
+	}
+	if (generated_root == nullptr) {
+		return;
+	}
+
+	UsdStageRefPtr expected_stage = open_stage_for_instance(p_source_path, p_variant_selections);
+	if (!expected_stage) {
+		return;
+	}
+
+	UsdSceneBuilder builder(expected_stage);
+	Node *expected_root = builder.build("_Generated");
+	if (expected_root == nullptr) {
+		return;
+	}
+
+	std::unordered_map<std::string, Node *> current_nodes;
+	std::unordered_map<std::string, Node *> expected_nodes;
+	collect_generated_composition_boundary_nodes(generated_root, false, &current_nodes, nullptr);
+	collect_generated_composition_boundary_nodes(expected_root, false, &expected_nodes, nullptr);
+	if (current_nodes.empty()) {
+		memdelete(expected_root);
+		return;
+	}
+
+	int warning_count = 0;
+	const int warning_limit = 12;
+	const auto warn_once = [&](const String &p_message) {
+		if (warning_count >= warning_limit) {
+			return;
+		}
+		UtilityFunctions::push_warning(vformat("USD source-preserving save detected generated edits below a composition boundary in %s: %s", p_source_path, p_message));
+		warning_count++;
+	};
+
+	for (const auto &entry : current_nodes) {
+		const auto expected_it = expected_nodes.find(entry.first);
+		if (expected_it == expected_nodes.end() || expected_it->second == nullptr || entry.second == nullptr) {
+			continue;
+		}
+
+		String mismatch_reason;
+		if (!generated_node_state_matches(entry.second, expected_it->second, &mismatch_reason)) {
+			warn_once(vformat("prim %s has a generated-node edit that cannot be merged into preserved USD composition (%s).", to_godot_string(entry.first), mismatch_reason));
+		}
+	}
+
+	if (warning_count == warning_limit) {
+		UtilityFunctions::push_warning(vformat("USD source-preserving save detected additional generated edits below composition boundaries in %s; further warnings were suppressed.", p_source_path));
+	}
+
+	memdelete(expected_root);
+}
+
 } // namespace
 
 void UsdStageResource::_bind_methods() {
@@ -2188,24 +2438,49 @@ Variant UsdSceneFormatLoader::_load(const String &p_path, const String &p_origin
 		return Variant();
 	}
 
-	Ref<UsdStageResource> stage_resource;
-	stage_resource.instantiate();
-	stage_resource->set_source_path(p_path);
-	if (stage_resource->refresh_metadata() != OK) {
+	UsdStageRefPtr stage_ptr = UsdStage::Open(get_absolute_path(p_path).utf8().get_data(), UsdStage::LoadAll);
+	if (!stage_ptr) {
 		return Variant();
 	}
 
-	UsdStageInstance *stage_instance = memnew(UsdStageInstance);
-	stage_instance->set_name(p_path.get_file().get_basename());
-	stage_instance->set_stage(stage_resource);
+	Node *scene_root = nullptr;
+	const Dictionary variant_sets = collect_variant_sets(stage_ptr);
+	if (!variant_sets.is_empty()) {
+		Ref<UsdStageResource> stage_resource;
+		stage_resource.instantiate();
+		stage_resource->set_source_path(p_path);
+		if (stage_resource->refresh_metadata() != OK) {
+			return Variant();
+		}
+
+		UsdStageInstance *stage_instance = memnew(UsdStageInstance);
+		stage_instance->set_name(p_path.get_file().get_basename());
+		stage_instance->set_stage(stage_resource);
+		stage_instance->rebuild();
+		scene_root = stage_instance;
+	} else {
+		UsdSceneBuilder builder(stage_ptr);
+		scene_root = builder.build(p_path.get_file().get_basename());
+		if (scene_root != nullptr) {
+			set_usd_metadata(scene_root, "usd:source_path", p_path);
+		}
+	}
+
+	if (scene_root == nullptr) {
+		return Variant();
+	}
+
+	for (int i = 0; i < scene_root->get_child_count(); i++) {
+		mark_owner_recursive(scene_root->get_child(i), scene_root);
+	}
 
 	Ref<PackedScene> packed_scene;
 	packed_scene.instantiate();
-	if (packed_scene->pack(stage_instance) != OK) {
-		memdelete(stage_instance);
+	if (packed_scene->pack(scene_root) != OK) {
+		memdelete(scene_root);
 		return Variant();
 	}
-	memdelete(stage_instance);
+	memdelete(scene_root);
 	packed_scene->set_path(p_path);
 	return packed_scene;
 }
@@ -2225,6 +2500,12 @@ Error UsdSceneFormatSaver::_save(const Ref<Resource> &p_resource, const String &
 
 	UsdStageInstance *stage_instance = Object::cast_to<UsdStageInstance>(root);
 	if (stage_instance == nullptr) {
+		const bool has_composition_boundaries = node_tree_has_usd_composition_boundaries(root);
+		if (p_path.get_extension().to_lower() == "usdz") {
+			report_usd_save_mode(vformat("packaging composed Godot scene as USDZ at %s; preserved read-only composition arcs stored on nodes are reauthored, but original package contents, inactive variant branches, and unsupported arcs are not preserved by this path.", p_path), has_composition_boundaries);
+		} else {
+			report_usd_save_mode(vformat("exporting composed Godot scene to %s; preserved read-only composition arcs stored on nodes are reauthored, but variant sets, inactive branches, and unsupported arcs are not reconstructed by this path.", p_path), has_composition_boundaries);
+		}
 		memdelete(root);
 		return save_authored_packed_scene_to_stage(packed_scene, p_path);
 	}
@@ -2244,53 +2525,46 @@ Error UsdSceneFormatSaver::_save(const Ref<Resource> &p_resource, const String &
 	if (is_usd_scene_extension(destination_extension) && destination_extension == source_extension) {
 		const Dictionary variant_selections = stage_instance->get_variant_selections();
 		const Dictionary stage_variant_sets = stage_resource->get_variant_sets();
+		warn_source_stage_instance_composition_boundary_edits(root, stage_resource->get_source_path(), variant_selections);
 
 		if (variant_selections_match_stage_defaults(variant_selections, stage_variant_sets)) {
 			const Error copy_error = copy_file_absolute_preserving_contents(source_absolute_path, destination_absolute_path);
+			if (copy_error == OK) {
+				report_usd_save_mode(vformat("preserved source USD file unchanged: %s -> %s", stage_resource->get_source_path(), p_path));
+			}
 			memdelete(root);
 			return copy_error;
 		}
 
 		if (destination_extension == "usdz") {
 			const Error save_error = save_source_usdz_with_variant_defaults(source_absolute_path, destination_absolute_path, p_path.get_file(), variant_selections);
+			if (save_error == OK) {
+				report_usd_save_mode(vformat("authored selected variant defaults into source %s while preserving inactive variant data: %s -> %s", destination_extension.to_upper(), stage_resource->get_source_path(), p_path));
+			}
 			memdelete(root);
 			return save_error;
 		}
 
 		if (destination_extension == "usd" || destination_extension == "usda" || destination_extension == "usdc") {
 			const Error save_error = save_source_usd_layer_with_variant_defaults(source_absolute_path, destination_absolute_path, p_path.get_file(), variant_selections);
+			if (save_error == OK) {
+				report_usd_save_mode(vformat("authored selected variant defaults into source %s while preserving inactive variant data: %s -> %s", destination_extension.to_upper(), stage_resource->get_source_path(), p_path));
+			}
 			memdelete(root);
 			return save_error;
 		}
 	}
 
-	UsdStageRefPtr stage_ptr = open_stage_for_instance(stage_resource->get_source_path(), stage_instance->get_variant_selections());
-	if (!stage_ptr) {
+	const bool has_composition_boundaries = node_tree_has_usd_composition_boundaries(root);
+	if (destination_extension == "usdz") {
+		report_usd_save_mode(vformat("packaging composed Godot scene as USDZ at %s; preserved read-only composition arcs stored on nodes are reauthored, but original package contents, inactive variant branches, and unsupported arcs are not preserved by this path.", p_path), has_composition_boundaries);
 		memdelete(root);
-		return ERR_CANT_OPEN;
+		return save_authored_packed_scene_to_stage(packed_scene, p_path);
 	}
 
-	const String absolute_path = destination_absolute_path;
-	const String base_dir = absolute_path.get_base_dir();
-	if (!base_dir.is_empty()) {
-		const Error mkdir_error = DirAccess::make_dir_recursive_absolute(base_dir);
-		if (mkdir_error != OK) {
-			memdelete(root);
-			return mkdir_error;
-		}
-	}
-
-	stage_instance->rebuild();
-	Node *generated_root = root->get_child_count() > 0 ? root->get_child(0) : nullptr;
-	if (generated_root != nullptr && node_tree_has_composition_arcs(generated_root)) {
-		const Error save_error = save_composition_preserving_generated_scene(generated_root, p_path, stage_ptr);
-		memdelete(root);
-		return save_error;
-	}
-
-	const bool exported = stage_ptr->Export(absolute_path.utf8().get_data(), true);
+	report_usd_save_mode(vformat("exporting composed Godot scene to %s; preserved read-only composition arcs stored on nodes are reauthored, but variant sets, inactive branches, and unsupported arcs are not reconstructed by this path.", p_path), has_composition_boundaries);
 	memdelete(root);
-	return exported ? OK : ERR_CANT_CREATE;
+	return save_authored_packed_scene_to_stage(packed_scene, p_path);
 }
 
 bool UsdSceneFormatSaver::_recognize(const Ref<Resource> &p_resource) const {

@@ -33,10 +33,15 @@ func _run_test() -> void:
     var generated: Node = null
     var mesh_instance: MeshInstance3D = null
     var material: Material = null
-    if root.get_child_count() > 0:
+    if root is UsdStageInstance and root.get_child_count() > 0:
         generated = root.get_child(0)
         print("Generated root: %s (%s), children=%d" % [generated.name, generated.get_class(), generated.get_child_count()])
         _print_generated_tree(generated)
+    else:
+        generated = root
+        _print_generated_tree(generated)
+
+    if generated != null:
         mesh_instance = _find_first_mesh_instance(generated)
         if mesh_instance != null and mesh_instance.mesh != null and mesh_instance.mesh.get_surface_count() > 0:
             material = mesh_instance.mesh.surface_get_material(0)
