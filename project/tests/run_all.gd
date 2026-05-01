@@ -23,6 +23,7 @@ const TESTS := [
 	"test_point_subset_roundtrip.gd",
 	"test_points_blend_shape_basic.gd",
 	"test_preview_lighting.gd",
+	"test_preview_texture_channels.gd",
 	"test_reset_stage_transform.gd",
 	"test_shared_subset_material_reuse.gd",
 	"test_simple_scene_save.gd",
