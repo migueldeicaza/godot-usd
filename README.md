@@ -53,7 +53,7 @@ Regression tests:
 /path/to/godot --headless --path project --script res://tests/run_all.gd
 ```
 
-The current regression manifest runs 37 isolated scripts and passes locally with the debug macOS arm64 build.
+The current regression manifest runs 40 isolated scripts and passes locally with the debug macOS arm64 build.
 
 Known gaps:
 
