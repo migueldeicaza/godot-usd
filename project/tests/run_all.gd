@@ -35,6 +35,7 @@ const TESTS := [
 	"test_source_aware_blend_shape_weight_save.gd",
 	"test_source_aware_skeleton_animation_save.gd",
 	"test_source_aware_skeleton_transform_channels_save.gd",
+	"test_source_aware_static_material_save.gd",
 	"test_source_aware_static_transform_save.gd",
 	"test_skinning_basic.gd",
 	"test_skip_preview_lighting_save.gd",

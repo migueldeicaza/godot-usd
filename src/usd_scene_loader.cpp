@@ -636,6 +636,97 @@ bool apply_node3d_transform_edits_to_stage(Node *p_node, const UsdStageRefPtr &p
 	return applied_any;
 }
 
+bool set_preview_surface_color_input_if_changed(UsdShadeShader p_shader, const TfToken &p_input_name, const Color &p_color) {
+	if (!p_shader) {
+		return false;
+	}
+
+	UsdShadeInput input = p_shader.GetInput(p_input_name);
+	if (input && input.HasConnectedSource()) {
+		return false;
+	}
+
+	const GfVec3f edited_value((float)p_color.r, (float)p_color.g, (float)p_color.b);
+	GfVec3f source_value(1.0f, 1.0f, 1.0f);
+	if (input && input.Get(&source_value) && gf_vec3f_is_equal_approx(source_value, edited_value)) {
+		return false;
+	}
+
+	p_shader.CreateInput(p_input_name, SdfValueTypeNames->Color3f).Set(edited_value);
+	return true;
+}
+
+bool set_preview_surface_float_input_if_changed(UsdShadeShader p_shader, const TfToken &p_input_name, float p_value, float p_default_value) {
+	if (!p_shader) {
+		return false;
+	}
+
+	UsdShadeInput input = p_shader.GetInput(p_input_name);
+	if (input && input.HasConnectedSource()) {
+		return false;
+	}
+
+	float source_value = p_default_value;
+	if (input && input.Get(&source_value) && Math::is_equal_approx((real_t)source_value, (real_t)p_value)) {
+		return false;
+	}
+
+	p_shader.CreateInput(p_input_name, SdfValueTypeNames->Float).Set(p_value);
+	return true;
+}
+
+bool apply_preview_surface_material_edits_to_bound_material(const UsdShadeMaterial &p_material, const Ref<Material> &p_godot_material) {
+	if (!p_material || p_godot_material.is_null()) {
+		return false;
+	}
+
+	Ref<BaseMaterial3D> base_material = p_godot_material;
+	if (base_material.is_null()) {
+		return false;
+	}
+
+	UsdShadeShader preview_surface = UsdShadeShader::Get(p_material.GetPrim().GetStage(), p_material.GetPath().AppendChild(TfToken("PreviewSurface")));
+	if (!preview_surface) {
+		return false;
+	}
+
+	bool changed = false;
+	const Color albedo = base_material->get_albedo();
+	changed = set_preview_surface_color_input_if_changed(preview_surface, TfToken("diffuseColor"), albedo) || changed;
+	changed = set_preview_surface_float_input_if_changed(preview_surface, TfToken("metallic"), base_material->get_metallic(), 0.0f) || changed;
+	changed = set_preview_surface_float_input_if_changed(preview_surface, TfToken("roughness"), base_material->get_roughness(), 0.5f) || changed;
+	changed = set_preview_surface_float_input_if_changed(preview_surface, TfToken("opacity"), CLAMP((float)albedo.a, 0.0f, 1.0f), 1.0f) || changed;
+	return changed;
+}
+
+bool apply_material_edits_to_stage(Node *p_node, const UsdStageRefPtr &p_stage) {
+	ERR_FAIL_NULL_V(p_node, false);
+	ERR_FAIL_COND_V(!p_stage, false);
+
+	bool applied_any = false;
+	if (MeshInstance3D *mesh_instance = Object::cast_to<MeshInstance3D>(p_node)) {
+		const Dictionary metadata = get_usd_metadata(mesh_instance);
+		const String prim_path = metadata.get("usd:prim_path", String());
+		if (!prim_path.is_empty()) {
+			const UsdPrim prim = p_stage->GetPrimAtPath(SdfPath(prim_path.utf8().get_data()));
+			if (prim) {
+				UsdShadeMaterial bound_material = UsdShadeMaterialBindingAPI(prim).ComputeBoundMaterial();
+				Ref<Material> material = mesh_instance->get_material_override();
+				if (material.is_null()) {
+					material = mesh_instance->get_active_material(0);
+				}
+				applied_any = apply_preview_surface_material_edits_to_bound_material(bound_material, material) || applied_any;
+			}
+		}
+	}
+
+	for (int i = 0; i < p_node->get_child_count(false); i++) {
+		applied_any = apply_material_edits_to_stage(p_node->get_child(i, false), p_stage) || applied_any;
+	}
+
+	return applied_any;
+}
+
 bool apply_animation_edits_to_stage(Node *p_node, const UsdStageRefPtr &p_stage) {
 	ERR_FAIL_NULL_V(p_node, false);
 	ERR_FAIL_COND_V(!p_stage, false);
@@ -783,9 +874,10 @@ Error save_static_imported_data_to_source_copy(Node *p_root, const String &p_sou
 
 	stage->SetEditTarget(root_layer);
 	const bool applied_transform_edits = apply_node3d_transform_edits_to_stage(p_root, stage);
+	const bool applied_material_edits = apply_material_edits_to_stage(p_root, stage);
 	const bool applied_skeleton_edits = apply_skeleton_rest_edits_to_stage(p_root, stage);
 	const bool applied_animation_edits = apply_animation_edits_to_stage(p_root, stage);
-	if (!applied_transform_edits && !applied_skeleton_edits && !applied_animation_edits) {
+	if (!applied_transform_edits && !applied_material_edits && !applied_skeleton_edits && !applied_animation_edits) {
 		return OK;
 	}
 
