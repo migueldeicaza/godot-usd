@@ -727,6 +727,97 @@ bool apply_material_edits_to_stage(Node *p_node, const UsdStageRefPtr &p_stage) 
 	return applied_any;
 }
 
+bool apply_mesh_point_edits_to_stage(Node *p_node, const UsdStageRefPtr &p_stage) {
+	ERR_FAIL_NULL_V(p_node, false);
+	ERR_FAIL_COND_V(!p_stage, false);
+
+	bool applied_any = false;
+	if (MeshInstance3D *mesh_instance = Object::cast_to<MeshInstance3D>(p_node)) {
+		const Dictionary metadata = get_usd_metadata(mesh_instance);
+		const String prim_path = metadata.get("usd:prim_path", String());
+		Ref<ArrayMesh> array_mesh = mesh_instance->get_mesh();
+		if (!prim_path.is_empty() && array_mesh.is_valid()) {
+			UsdGeomMesh usd_mesh(p_stage->GetPrimAtPath(SdfPath(prim_path.utf8().get_data())));
+			if (usd_mesh) {
+				VtArray<GfVec3f> points;
+				if (usd_mesh.GetPointsAttr().Get(&points) && !points.empty()) {
+					std::vector<bool> seen_points(points.size(), false);
+					std::vector<GfVec3f> edited_points(points.begin(), points.end());
+					bool can_merge = true;
+					int mapped_vertex_count = 0;
+					const Array surface_descriptions = metadata.get("usd:material_subsets", Array());
+
+					for (int surface_index = 0; surface_index < array_mesh->get_surface_count() && can_merge; surface_index++) {
+						const Array arrays = array_mesh->surface_get_arrays(surface_index);
+						if (arrays.size() != Mesh::ARRAY_MAX) {
+							continue;
+						}
+						const PackedVector3Array vertices = arrays[Mesh::ARRAY_VERTEX];
+						if (vertices.is_empty()) {
+							continue;
+						}
+
+						PackedInt32Array authored_point_indices;
+						if (surface_index < surface_descriptions.size() && surface_descriptions[surface_index].get_type() == Variant::DICTIONARY) {
+							const Dictionary description = surface_descriptions[surface_index];
+							authored_point_indices = description.get("authored_point_indices", PackedInt32Array());
+						}
+
+						if (authored_point_indices.size() != vertices.size()) {
+							if (array_mesh->get_surface_count() == 1 && vertices.size() == (int)points.size()) {
+								authored_point_indices.resize(vertices.size());
+								for (int i = 0; i < vertices.size(); i++) {
+									authored_point_indices.set(i, i);
+								}
+							} else {
+								can_merge = false;
+								break;
+							}
+						}
+
+						for (int vertex_index = 0; vertex_index < vertices.size(); vertex_index++) {
+							const int point_index = authored_point_indices[vertex_index];
+							if (point_index < 0 || point_index >= (int)points.size()) {
+								can_merge = false;
+								break;
+							}
+							const Vector3 vertex = vertices[vertex_index];
+							const GfVec3f edited_point((float)vertex.x, (float)vertex.y, (float)vertex.z);
+							if (seen_points[point_index] && !gf_vec3f_is_equal_approx(edited_points[point_index], edited_point)) {
+								can_merge = false;
+								break;
+							}
+							seen_points[point_index] = true;
+							edited_points[point_index] = edited_point;
+							mapped_vertex_count++;
+						}
+					}
+
+					if (can_merge && mapped_vertex_count > 0) {
+						bool changed = false;
+						for (int point_index = 0; point_index < (int)points.size(); point_index++) {
+							if (seen_points[point_index] && !gf_vec3f_is_equal_approx(points[point_index], edited_points[point_index])) {
+								points[point_index] = edited_points[point_index];
+								changed = true;
+							}
+						}
+						if (changed) {
+							usd_mesh.GetPointsAttr().Set(points);
+							applied_any = true;
+						}
+					}
+				}
+			}
+		}
+	}
+
+	for (int i = 0; i < p_node->get_child_count(false); i++) {
+		applied_any = apply_mesh_point_edits_to_stage(p_node->get_child(i, false), p_stage) || applied_any;
+	}
+
+	return applied_any;
+}
+
 bool apply_animation_edits_to_stage(Node *p_node, const UsdStageRefPtr &p_stage) {
 	ERR_FAIL_NULL_V(p_node, false);
 	ERR_FAIL_COND_V(!p_stage, false);
@@ -875,9 +966,10 @@ Error save_static_imported_data_to_source_copy(Node *p_root, const String &p_sou
 	stage->SetEditTarget(root_layer);
 	const bool applied_transform_edits = apply_node3d_transform_edits_to_stage(p_root, stage);
 	const bool applied_material_edits = apply_material_edits_to_stage(p_root, stage);
+	const bool applied_mesh_point_edits = apply_mesh_point_edits_to_stage(p_root, stage);
 	const bool applied_skeleton_edits = apply_skeleton_rest_edits_to_stage(p_root, stage);
 	const bool applied_animation_edits = apply_animation_edits_to_stage(p_root, stage);
-	if (!applied_transform_edits && !applied_material_edits && !applied_skeleton_edits && !applied_animation_edits) {
+	if (!applied_transform_edits && !applied_material_edits && !applied_mesh_point_edits && !applied_skeleton_edits && !applied_animation_edits) {
 		return OK;
 	}
 

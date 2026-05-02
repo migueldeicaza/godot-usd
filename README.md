@@ -6,7 +6,7 @@ Current scope:
 
 - registers `UsdStageResource` and `UsdStageInstance`
 - registers a runtime `ResourceFormatLoader` for `.usd`, `.usda`, `.usdc`, `.usdz`
-- registers a `ResourceFormatSaver` with authored-scene, composed-stage, static-source-preserving, static transform/material/skeleton/animation edit merge, composition-preserving, and source-preserving variant save paths
+- registers a `ResourceFormatSaver` with authored-scene, composed-stage, static-source-preserving, static transform/material/mesh-point/skeleton/animation edit merge, composition-preserving, and source-preserving variant save paths
 - registers an editor `EditorSceneFormatImporter` through an `EditorPlugin`
 - ports a first-pass USD scene builder:
   - hierarchy
@@ -53,7 +53,7 @@ Regression tests:
 /path/to/godot --headless --path project --script res://tests/run_all.gd
 ```
 
-The current regression manifest runs 45 isolated scripts and passes locally with the debug macOS arm64 build.
+The current regression manifest runs 46 isolated scripts and passes locally with the debug macOS arm64 build.
 
 Known gaps:
 
