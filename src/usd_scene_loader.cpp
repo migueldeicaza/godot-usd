@@ -727,7 +727,19 @@ bool apply_material_edits_to_stage(Node *p_node, const UsdStageRefPtr &p_stage) 
 	return applied_any;
 }
 
-bool apply_mesh_point_edits_to_stage(Node *p_node, const UsdStageRefPtr &p_stage) {
+void append_static_save_warning(PackedStringArray *r_warnings, const String &p_warning) {
+	if (r_warnings == nullptr || p_warning.is_empty()) {
+		return;
+	}
+	for (int i = 0; i < r_warnings->size(); i++) {
+		if ((*r_warnings)[i] == p_warning) {
+			return;
+		}
+	}
+	r_warnings->push_back(p_warning);
+}
+
+bool apply_mesh_point_edits_to_stage(Node *p_node, const UsdStageRefPtr &p_stage, PackedStringArray *r_warnings) {
 	ERR_FAIL_NULL_V(p_node, false);
 	ERR_FAIL_COND_V(!p_stage, false);
 
@@ -744,6 +756,7 @@ bool apply_mesh_point_edits_to_stage(Node *p_node, const UsdStageRefPtr &p_stage
 					std::vector<bool> seen_points(points.size(), false);
 					std::vector<GfVec3f> edited_points(points.begin(), points.end());
 					bool can_merge = true;
+					String unsupported_reason;
 					int mapped_vertex_count = 0;
 					const Array surface_descriptions = metadata.get("usd:material_subsets", Array());
 
@@ -770,6 +783,7 @@ bool apply_mesh_point_edits_to_stage(Node *p_node, const UsdStageRefPtr &p_stage
 									authored_point_indices.set(i, i);
 								}
 							} else {
+								unsupported_reason = vformat("mesh topology changed at %s: surface %d has %d vertices, but source point mapping has %d entries", prim_path, surface_index, vertices.size(), authored_point_indices.size());
 								can_merge = false;
 								break;
 							}
@@ -778,12 +792,14 @@ bool apply_mesh_point_edits_to_stage(Node *p_node, const UsdStageRefPtr &p_stage
 						for (int vertex_index = 0; vertex_index < vertices.size(); vertex_index++) {
 							const int point_index = authored_point_indices[vertex_index];
 							if (point_index < 0 || point_index >= (int)points.size()) {
+								unsupported_reason = vformat("mesh point mapping changed at %s: surface %d references invalid source point %d", prim_path, surface_index, point_index);
 								can_merge = false;
 								break;
 							}
 							const Vector3 vertex = vertices[vertex_index];
 							const GfVec3f edited_point((float)vertex.x, (float)vertex.y, (float)vertex.z);
 							if (seen_points[point_index] && !gf_vec3f_is_equal_approx(edited_points[point_index], edited_point)) {
+								unsupported_reason = vformat("mesh topology/vertex split changed at %s: source point %d maps to conflicting edited vertices", prim_path, point_index);
 								can_merge = false;
 								break;
 							}
@@ -805,6 +821,8 @@ bool apply_mesh_point_edits_to_stage(Node *p_node, const UsdStageRefPtr &p_stage
 							usd_mesh.GetPointsAttr().Set(points);
 							applied_any = true;
 						}
+					} else if (!unsupported_reason.is_empty()) {
+						append_static_save_warning(r_warnings, unsupported_reason);
 					}
 				}
 			}
@@ -812,7 +830,7 @@ bool apply_mesh_point_edits_to_stage(Node *p_node, const UsdStageRefPtr &p_stage
 	}
 
 	for (int i = 0; i < p_node->get_child_count(false); i++) {
-		applied_any = apply_mesh_point_edits_to_stage(p_node->get_child(i, false), p_stage) || applied_any;
+		applied_any = apply_mesh_point_edits_to_stage(p_node->get_child(i, false), p_stage, r_warnings) || applied_any;
 	}
 
 	return applied_any;
@@ -964,11 +982,15 @@ Error save_static_imported_data_to_source_copy(Node *p_root, const String &p_sou
 	ERR_FAIL_COND_V_MSG(!stage, ERR_CANT_OPEN, vformat("Failed to compose copied USD layer for source-aware static save: %s", p_destination_absolute_path));
 
 	stage->SetEditTarget(root_layer);
+	PackedStringArray unsupported_warnings;
 	const bool applied_transform_edits = apply_node3d_transform_edits_to_stage(p_root, stage);
 	const bool applied_material_edits = apply_material_edits_to_stage(p_root, stage);
-	const bool applied_mesh_point_edits = apply_mesh_point_edits_to_stage(p_root, stage);
+	const bool applied_mesh_point_edits = apply_mesh_point_edits_to_stage(p_root, stage, &unsupported_warnings);
 	const bool applied_skeleton_edits = apply_skeleton_rest_edits_to_stage(p_root, stage);
 	const bool applied_animation_edits = apply_animation_edits_to_stage(p_root, stage);
+	for (int i = 0; i < unsupported_warnings.size(); i++) {
+		UtilityFunctions::push_warning(vformat("USD source-aware static save could not merge unsupported edit: %s", unsupported_warnings[i]));
+	}
 	if (!applied_transform_edits && !applied_material_edits && !applied_mesh_point_edits && !applied_skeleton_edits && !applied_animation_edits) {
 		return OK;
 	}
