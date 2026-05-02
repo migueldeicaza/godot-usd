@@ -4,6 +4,11 @@ const EDITOR_TESTS := {
 	"test_importer_variants.gd": true,
 }
 
+const EXPECTED_OUTPUT := {
+	"test_source_aware_static_material_rebind_warning.gd": "USD source-aware static save could not merge unsupported edit: material replacement/rebinding changed at /Root/Quad",
+	"test_source_aware_static_mesh_unsupported_warning.gd": "USD source-aware static save could not merge unsupported edit: mesh topology changed at /Root/Quad",
+}
+
 const TESTS := [
 	"test_array_mesh_save.gd",
 	"test_blend_shape_basic.gd",
@@ -36,6 +41,7 @@ const TESTS := [
 	"test_source_aware_skeleton_animation_save.gd",
 	"test_source_aware_skeleton_transform_channels_save.gd",
 	"test_source_aware_static_material_save.gd",
+	"test_source_aware_static_material_rebind_warning.gd",
 	"test_source_aware_static_mesh_points_save.gd",
 	"test_source_aware_static_mesh_unsupported_warning.gd",
 	"test_source_aware_static_transform_save.gd",
@@ -136,7 +142,14 @@ func _run_all() -> void:
 	for test_name in TESTS:
 		var result := await _run_test_process(executable, project_path, test_name, output_dir)
 		var exit_code := int(result["exit_code"])
+		var output := String(result["output"])
 		if exit_code == 0 and not bool(result["timed_out"]):
+			var expected_output := String(EXPECTED_OUTPUT.get(test_name, ""))
+			if not expected_output.is_empty() and not output.contains(expected_output):
+				failures += 1
+				push_error("FAIL %s (missing expected output)" % test_name)
+				printerr(output)
+				continue
 			print("PASS %s" % test_name)
 			continue
 
@@ -145,7 +158,7 @@ func _run_all() -> void:
 			push_error("TIMEOUT %s" % test_name)
 		else:
 			push_error("FAIL %s (exit %d)" % [test_name, exit_code])
-		printerr(String(result["output"]))
+		printerr(output)
 
 	if failures > 0:
 		push_error("%d Godot USD extension tests failed." % failures)

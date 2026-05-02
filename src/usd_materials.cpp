@@ -478,6 +478,7 @@ Ref<Material> build_material_from_usd_material(const UsdStageRefPtr &p_stage, co
 
 	Ref<StandardMaterial3D> material;
 	material.instantiate();
+	set_usd_metadata(material.ptr(), "usd:material_path", material_path);
 	bool has_uv_transform = false;
 	Vector3 uv_scale;
 	Vector3 uv_offset;

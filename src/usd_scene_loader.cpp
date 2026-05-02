@@ -699,7 +699,19 @@ bool apply_preview_surface_material_edits_to_bound_material(const UsdShadeMateri
 	return changed;
 }
 
-bool apply_material_edits_to_stage(Node *p_node, const UsdStageRefPtr &p_stage) {
+void append_static_save_warning(PackedStringArray *r_warnings, const String &p_warning) {
+	if (r_warnings == nullptr || p_warning.is_empty()) {
+		return;
+	}
+	for (int i = 0; i < r_warnings->size(); i++) {
+		if ((*r_warnings)[i] == p_warning) {
+			return;
+		}
+	}
+	r_warnings->push_back(p_warning);
+}
+
+bool apply_material_edits_to_stage(Node *p_node, const UsdStageRefPtr &p_stage, PackedStringArray *r_warnings) {
 	ERR_FAIL_NULL_V(p_node, false);
 	ERR_FAIL_COND_V(!p_stage, false);
 
@@ -715,28 +727,24 @@ bool apply_material_edits_to_stage(Node *p_node, const UsdStageRefPtr &p_stage) 
 				if (material.is_null()) {
 					material = mesh_instance->get_active_material(0);
 				}
-				applied_any = apply_preview_surface_material_edits_to_bound_material(bound_material, material) || applied_any;
+				if (material.is_valid() && bound_material) {
+					const String material_path = get_usd_metadata(material.ptr()).get("usd:material_path", String());
+					const String bound_material_path = to_godot_string(bound_material.GetPath().GetString());
+					if (material_path.is_empty() || material_path != bound_material_path) {
+						append_static_save_warning(r_warnings, vformat("material replacement/rebinding changed at %s; source-aware static save currently only merges in-place edits to the originally bound material", prim_path));
+					} else {
+						applied_any = apply_preview_surface_material_edits_to_bound_material(bound_material, material) || applied_any;
+					}
+				}
 			}
 		}
 	}
 
 	for (int i = 0; i < p_node->get_child_count(false); i++) {
-		applied_any = apply_material_edits_to_stage(p_node->get_child(i, false), p_stage) || applied_any;
+		applied_any = apply_material_edits_to_stage(p_node->get_child(i, false), p_stage, r_warnings) || applied_any;
 	}
 
 	return applied_any;
-}
-
-void append_static_save_warning(PackedStringArray *r_warnings, const String &p_warning) {
-	if (r_warnings == nullptr || p_warning.is_empty()) {
-		return;
-	}
-	for (int i = 0; i < r_warnings->size(); i++) {
-		if ((*r_warnings)[i] == p_warning) {
-			return;
-		}
-	}
-	r_warnings->push_back(p_warning);
 }
 
 bool apply_mesh_point_edits_to_stage(Node *p_node, const UsdStageRefPtr &p_stage, PackedStringArray *r_warnings) {
@@ -984,7 +992,7 @@ Error save_static_imported_data_to_source_copy(Node *p_root, const String &p_sou
 	stage->SetEditTarget(root_layer);
 	PackedStringArray unsupported_warnings;
 	const bool applied_transform_edits = apply_node3d_transform_edits_to_stage(p_root, stage);
-	const bool applied_material_edits = apply_material_edits_to_stage(p_root, stage);
+	const bool applied_material_edits = apply_material_edits_to_stage(p_root, stage, &unsupported_warnings);
 	const bool applied_mesh_point_edits = apply_mesh_point_edits_to_stage(p_root, stage, &unsupported_warnings);
 	const bool applied_skeleton_edits = apply_skeleton_rest_edits_to_stage(p_root, stage);
 	const bool applied_animation_edits = apply_animation_edits_to_stage(p_root, stage);
