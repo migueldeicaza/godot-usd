@@ -418,10 +418,13 @@ bool node_tree_has_usd_composition_boundaries(Node *p_node) {
 	return false;
 }
 
-bool node_tree_has_source_aware_skeleton_data(Node *p_node) {
+bool node_tree_has_source_aware_static_data(Node *p_node) {
 	ERR_FAIL_NULL_V(p_node, false);
 
 	const Dictionary metadata = get_usd_metadata(p_node);
+	if (Object::cast_to<Node3D>(p_node) != nullptr && metadata.has("usd:prim_path")) {
+		return true;
+	}
 	if (Object::cast_to<Skeleton3D>(p_node) != nullptr && metadata.has("usd:prim_path")) {
 		return true;
 	}
@@ -437,7 +440,7 @@ bool node_tree_has_source_aware_skeleton_data(Node *p_node) {
 	}
 
 	for (int i = 0; i < p_node->get_child_count(false); i++) {
-		if (node_tree_has_source_aware_skeleton_data(p_node->get_child(i, false))) {
+		if (node_tree_has_source_aware_static_data(p_node->get_child(i, false))) {
 			return true;
 		}
 	}
@@ -601,6 +604,38 @@ bool apply_skeleton_rest_edits_to_stage(Node *p_node, const UsdStageRefPtr &p_st
 	return applied_any;
 }
 
+bool apply_node3d_transform_edits_to_stage(Node *p_node, const UsdStageRefPtr &p_stage) {
+	ERR_FAIL_NULL_V(p_node, false);
+	ERR_FAIL_COND_V(!p_stage, false);
+
+	bool applied_any = false;
+	if (Node3D *node_3d = Object::cast_to<Node3D>(p_node)) {
+		const Dictionary metadata = get_usd_metadata(node_3d);
+		const String prim_path = metadata.get("usd:prim_path", String());
+		if (!prim_path.is_empty() && !(bool)metadata.get("usd:generated_preview", false)) {
+			const UsdPrim prim = p_stage->GetPrimAtPath(SdfPath(prim_path.utf8().get_data()));
+			UsdGeomXformable xformable(prim);
+			if (xformable) {
+				GfMatrix4d source_local_matrix(1.0);
+				bool resets_xform_stack = false;
+				xformable.GetLocalTransformation(&source_local_matrix, &resets_xform_stack, UsdTimeCode::Default());
+
+				const GfMatrix4d edited_local_matrix = transform_to_gf_matrix(node_3d->get_transform());
+				if (!gf_matrix_is_equal_approx(source_local_matrix, edited_local_matrix)) {
+					apply_node3d_transform(node_3d, xformable);
+					applied_any = true;
+				}
+			}
+		}
+	}
+
+	for (int i = 0; i < p_node->get_child_count(false); i++) {
+		applied_any = apply_node3d_transform_edits_to_stage(p_node->get_child(i, false), p_stage) || applied_any;
+	}
+
+	return applied_any;
+}
+
 bool apply_animation_edits_to_stage(Node *p_node, const UsdStageRefPtr &p_stage) {
 	ERR_FAIL_NULL_V(p_node, false);
 	ERR_FAIL_COND_V(!p_stage, false);
@@ -734,22 +769,23 @@ bool apply_animation_edits_to_stage(Node *p_node, const UsdStageRefPtr &p_stage)
 	return applied_any;
 }
 
-Error save_static_imported_skeleton_data_to_source_copy(Node *p_root, const String &p_source_absolute_path, const String &p_destination_absolute_path) {
+Error save_static_imported_data_to_source_copy(Node *p_root, const String &p_source_absolute_path, const String &p_destination_absolute_path) {
 	ERR_FAIL_NULL_V(p_root, ERR_INVALID_PARAMETER);
 
 	const Error copy_error = copy_file_absolute_preserving_contents(p_source_absolute_path, p_destination_absolute_path);
-	ERR_FAIL_COND_V_MSG(copy_error != OK, copy_error, vformat("Failed to copy source USD layer for source-aware skeleton save: %s", p_source_absolute_path));
+	ERR_FAIL_COND_V_MSG(copy_error != OK, copy_error, vformat("Failed to copy source USD layer for source-aware static save: %s", p_source_absolute_path));
 
 	SdfLayerRefPtr root_layer = SdfLayer::FindOrOpen(p_destination_absolute_path.utf8().get_data());
-	ERR_FAIL_COND_V_MSG(!root_layer, ERR_CANT_OPEN, vformat("Failed to open copied USD layer for source-aware skeleton save: %s", p_destination_absolute_path));
+	ERR_FAIL_COND_V_MSG(!root_layer, ERR_CANT_OPEN, vformat("Failed to open copied USD layer for source-aware static save: %s", p_destination_absolute_path));
 
 	UsdStageRefPtr stage = UsdStage::Open(root_layer);
-	ERR_FAIL_COND_V_MSG(!stage, ERR_CANT_OPEN, vformat("Failed to compose copied USD layer for source-aware skeleton save: %s", p_destination_absolute_path));
+	ERR_FAIL_COND_V_MSG(!stage, ERR_CANT_OPEN, vformat("Failed to compose copied USD layer for source-aware static save: %s", p_destination_absolute_path));
 
 	stage->SetEditTarget(root_layer);
+	const bool applied_transform_edits = apply_node3d_transform_edits_to_stage(p_root, stage);
 	const bool applied_skeleton_edits = apply_skeleton_rest_edits_to_stage(p_root, stage);
 	const bool applied_animation_edits = apply_animation_edits_to_stage(p_root, stage);
-	if (!applied_skeleton_edits && !applied_animation_edits) {
+	if (!applied_transform_edits && !applied_skeleton_edits && !applied_animation_edits) {
 		return OK;
 	}
 
@@ -3273,10 +3309,10 @@ Error UsdSceneFormatSaver::_save(const Ref<Resource> &p_resource, const String &
 			}
 
 			if (is_usd_scene_extension(destination_extension) && destination_extension == source_extension) {
-				if (destination_extension != "usdz" && node_tree_has_source_aware_skeleton_data(root)) {
-					const Error save_error = save_static_imported_skeleton_data_to_source_copy(root, source_absolute_path, destination_absolute_path);
+				if (destination_extension != "usdz" && node_tree_has_source_aware_static_data(root)) {
+					const Error save_error = save_static_imported_data_to_source_copy(root, source_absolute_path, destination_absolute_path);
 					if (save_error == OK) {
-						report_usd_save_mode(vformat("preserved static imported USD source while merging skeleton and animation edits: %s -> %s", static_source_path, p_path));
+						report_usd_save_mode(vformat("preserved static imported USD source while merging supported static edits: %s -> %s", static_source_path, p_path));
 					}
 					free_saver_root(root);
 					return save_error;
