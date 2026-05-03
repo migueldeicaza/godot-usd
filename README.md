@@ -53,10 +53,25 @@ Regression tests:
 /path/to/godot --headless --path project --script res://tests/run_all.gd
 ```
 
-The current regression manifest runs 48 isolated scripts and passes locally with the debug macOS arm64 build.
+The current regression manifest runs 53 isolated scripts and passes locally with the debug macOS arm64 build.
+
+Validated local dependency set:
+
+- Godot: `4.7.dev.custom_build.181b24ba2` editor binary
+- Godot source checkout used locally: `4.6-stable-882-g01613fad81`
+- `godot-cpp`: `6388e26`
+- OpenUSD install: `PXR_VERSION 2608`, built from `v24.11-2394-g46115ca41`
+- TBB: Homebrew `tbb 2022.3.0`
+
+Fixture provenance:
+
+- Most `.usda` files under `project/samples/` are small hand-authored parity fixtures for this GDExtension harness.
+- `project/samples/packaged_preview.usdz` is copied from the module test fixture at `../tests/data/usd/packaged_preview.usdz`.
+- `project/samples/preview_surface_packaged.usdz` is generated from `project/samples/package_src/preview_surface_packaged.usda` and `project/samples/package_src/textures/albedo.svg`.
+- `project/samples/vehicleVariants.selfcontained.usdz` is copied from the local USD sample asset stored at `../thirdparty/vehicleVariants.selfcontained.usdz`.
+- Texture fixtures that reference `../images/icon.png` use the repository image at `project/images/icon.png`.
 
 Known gaps:
 
 - save/export is not yet full module parity for every edit-aware scene case
 - broader runtime mesh/material edge cases still need audit against `modules/usd/tests`
-- packaging docs still need exact supported Godot, `godot-cpp`, OpenUSD, and TBB version notes

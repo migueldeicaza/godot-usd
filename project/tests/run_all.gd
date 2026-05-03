@@ -5,8 +5,13 @@ const EDITOR_TESTS := {
 }
 
 const EXPECTED_OUTPUT := {
+	"test_source_aware_inbetween_blend_shape_warning.gd": "USD source-aware static save could not merge unsupported edit: derived inbetween blend-shape track at /root/Plane/Skel/Anim:Key_1__inbetween__HalfKey",
 	"test_source_aware_static_material_rebind_warning.gd": "USD source-aware static save could not merge unsupported edit: material replacement/rebinding changed at /Root/Quad",
+	"test_source_aware_static_material_subset_rebind_warning.gd": "USD source-aware static save could not merge unsupported edit: material subset rebinding changed at /Root/Panel surface 1",
+	"test_source_aware_static_mesh_index_warning.gd": "USD source-aware static save could not merge unsupported edit: mesh index buffer changed at /Root/Quad surface 0",
+	"test_source_aware_static_mesh_primvar_warning.gd": "USD source-aware static save could not merge unsupported edit: mesh UV primvar changed at /Root/Quad surface 0",
 	"test_source_aware_static_mesh_unsupported_warning.gd": "USD source-aware static save could not merge unsupported edit: mesh topology changed at /Root/Quad",
+	"test_source_aware_static_texture_network_warning.gd": "USD source-aware static save could not merge unsupported edit: texture-network material edit changed at /TexturedQuad surface 0",
 }
 
 const TESTS := [
@@ -38,12 +43,17 @@ const TESTS := [
 	"test_skeleton_basic.gd",
 	"test_skeleton_roundtrip_save.gd",
 	"test_source_aware_blend_shape_weight_save.gd",
+	"test_source_aware_inbetween_blend_shape_warning.gd",
 	"test_source_aware_skeleton_animation_save.gd",
 	"test_source_aware_skeleton_transform_channels_save.gd",
 	"test_source_aware_static_material_save.gd",
 	"test_source_aware_static_material_rebind_warning.gd",
+	"test_source_aware_static_material_subset_rebind_warning.gd",
+	"test_source_aware_static_mesh_index_warning.gd",
+	"test_source_aware_static_mesh_primvar_warning.gd",
 	"test_source_aware_static_mesh_points_save.gd",
 	"test_source_aware_static_mesh_unsupported_warning.gd",
+	"test_source_aware_static_texture_network_warning.gd",
 	"test_source_aware_static_transform_save.gd",
 	"test_skinning_basic.gd",
 	"test_skip_preview_lighting_save.gd",

@@ -25,6 +25,7 @@
 #include <godot_cpp/classes/environment.hpp>
 #include <godot_cpp/classes/file_access.hpp>
 #include <godot_cpp/classes/global_constants.hpp>
+#include <godot_cpp/classes/image.hpp>
 #include <godot_cpp/classes/json.hpp>
 #include <godot_cpp/classes/class_db_singleton.hpp>
 #include <godot_cpp/classes/light3d.hpp>
@@ -50,6 +51,7 @@
 #include <godot_cpp/core/property_info.hpp>
 #include <godot_cpp/templates/list.hpp>
 #include <godot_cpp/variant/array.hpp>
+#include <godot_cpp/variant/packed_byte_array.hpp>
 #include <godot_cpp/variant/packed_color_array.hpp>
 #include <godot_cpp/variant/packed_int32_array.hpp>
 #include <godot_cpp/variant/callable_method_pointer.hpp>
@@ -711,6 +713,257 @@ void append_static_save_warning(PackedStringArray *r_warnings, const String &p_w
 	r_warnings->push_back(p_warning);
 }
 
+bool packed_int32_arrays_equal(const PackedInt32Array &p_left, const PackedInt32Array &p_right) {
+	if (p_left.size() != p_right.size()) {
+		return false;
+	}
+	for (int i = 0; i < p_left.size(); i++) {
+		if (p_left[i] != p_right[i]) {
+			return false;
+		}
+	}
+	return true;
+}
+
+bool packed_vector2_arrays_equal_approx(const PackedVector2Array &p_left, const PackedVector2Array &p_right) {
+	if (p_left.size() != p_right.size()) {
+		return false;
+	}
+	for (int i = 0; i < p_left.size(); i++) {
+		if (!p_left[i].is_equal_approx(p_right[i])) {
+			return false;
+		}
+	}
+	return true;
+}
+
+bool packed_vector3_arrays_equal_approx(const PackedVector3Array &p_left, const PackedVector3Array &p_right) {
+	if (p_left.size() != p_right.size()) {
+		return false;
+	}
+	for (int i = 0; i < p_left.size(); i++) {
+		if (!p_left[i].is_equal_approx(p_right[i])) {
+			return false;
+		}
+	}
+	return true;
+}
+
+bool packed_color_arrays_equal_approx(const PackedColorArray &p_left, const PackedColorArray &p_right) {
+	if (p_left.size() != p_right.size()) {
+		return false;
+	}
+	for (int i = 0; i < p_left.size(); i++) {
+		if (!p_left[i].is_equal_approx(p_right[i])) {
+			return false;
+		}
+	}
+	return true;
+}
+
+bool packed_byte_arrays_equal(const PackedByteArray &p_left, const PackedByteArray &p_right) {
+	if (p_left.size() != p_right.size()) {
+		return false;
+	}
+	for (int i = 0; i < p_left.size(); i++) {
+		if (p_left[i] != p_right[i]) {
+			return false;
+		}
+	}
+	return true;
+}
+
+bool texture_images_equal(const Ref<Texture2D> &p_left, const Ref<Texture2D> &p_right) {
+	if (p_left.is_null() && p_right.is_null()) {
+		return true;
+	}
+	if (p_left.is_null() || p_right.is_null()) {
+		return false;
+	}
+
+	Ref<Image> left_image = p_left->get_image();
+	Ref<Image> right_image = p_right->get_image();
+	if (left_image.is_null() && right_image.is_null()) {
+		return true;
+	}
+	if (left_image.is_null() || right_image.is_null()) {
+		return false;
+	}
+	if (left_image->get_width() != right_image->get_width() ||
+			left_image->get_height() != right_image->get_height() ||
+			left_image->get_format() != right_image->get_format()) {
+		return false;
+	}
+	return packed_byte_arrays_equal(left_image->get_data(), right_image->get_data());
+}
+
+bool colors_equal_approx(const Color &p_left, const Color &p_right) {
+	return p_left.is_equal_approx(p_right);
+}
+
+bool texture_network_material_differs(const Ref<Material> &p_current_material, const Ref<Material> &p_source_material) {
+	Ref<BaseMaterial3D> current = p_current_material;
+	Ref<BaseMaterial3D> source = p_source_material;
+	if (current.is_null() || source.is_null()) {
+		Dictionary current_sources;
+		Dictionary source_sources;
+		if (current.is_valid()) {
+			current_sources = get_usd_metadata(current.ptr()).get("usd:preview_surface_texture_sources", Dictionary());
+		}
+		if (source.is_valid()) {
+			source_sources = get_usd_metadata(source.ptr()).get("usd:preview_surface_texture_sources", Dictionary());
+		}
+		return (!current_sources.is_empty() || !source_sources.is_empty()) && current != source;
+	}
+
+	const Dictionary source_texture_sources = get_usd_metadata(source.ptr()).get("usd:preview_surface_texture_sources", Dictionary());
+	const Dictionary current_texture_sources = get_usd_metadata(current.ptr()).get("usd:preview_surface_texture_sources", Dictionary());
+	if (source_texture_sources.is_empty() && current_texture_sources.is_empty()) {
+		return false;
+	}
+
+	if (!texture_images_equal(current->get_texture(BaseMaterial3D::TEXTURE_ALBEDO), source->get_texture(BaseMaterial3D::TEXTURE_ALBEDO)) ||
+			!texture_images_equal(current->get_texture(BaseMaterial3D::TEXTURE_METALLIC), source->get_texture(BaseMaterial3D::TEXTURE_METALLIC)) ||
+			!texture_images_equal(current->get_texture(BaseMaterial3D::TEXTURE_ROUGHNESS), source->get_texture(BaseMaterial3D::TEXTURE_ROUGHNESS)) ||
+			!texture_images_equal(current->get_texture(BaseMaterial3D::TEXTURE_NORMAL), source->get_texture(BaseMaterial3D::TEXTURE_NORMAL)) ||
+			!texture_images_equal(current->get_texture(BaseMaterial3D::TEXTURE_EMISSION), source->get_texture(BaseMaterial3D::TEXTURE_EMISSION)) ||
+			!texture_images_equal(current->get_texture(BaseMaterial3D::TEXTURE_CLEARCOAT), source->get_texture(BaseMaterial3D::TEXTURE_CLEARCOAT)) ||
+			!texture_images_equal(current->get_texture(BaseMaterial3D::TEXTURE_AMBIENT_OCCLUSION), source->get_texture(BaseMaterial3D::TEXTURE_AMBIENT_OCCLUSION))) {
+		return true;
+	}
+
+	if (current->get_metallic_texture_channel() != source->get_metallic_texture_channel() ||
+			current->get_roughness_texture_channel() != source->get_roughness_texture_channel() ||
+			current->get_ao_texture_channel() != source->get_ao_texture_channel() ||
+			!current->get_uv1_scale().is_equal_approx(source->get_uv1_scale()) ||
+			!current->get_uv1_offset().is_equal_approx(source->get_uv1_offset())) {
+		return true;
+	}
+
+	if (source_texture_sources.has("diffuseColor") && !colors_equal_approx(current->get_albedo(), source->get_albedo())) {
+		return true;
+	}
+	if (source_texture_sources.has("metallic") && !Math::is_equal_approx(current->get_metallic(), source->get_metallic())) {
+		return true;
+	}
+	if (source_texture_sources.has("roughness") && !Math::is_equal_approx(current->get_roughness(), source->get_roughness())) {
+		return true;
+	}
+	if (source_texture_sources.has("emissiveColor") && !colors_equal_approx(current->get_emission(), source->get_emission())) {
+		return true;
+	}
+	if ((source_texture_sources.has("clearcoat") || source_texture_sources.has("clearcoatRoughness")) &&
+			(!Math::is_equal_approx(current->get_clearcoat(), source->get_clearcoat()) ||
+					!Math::is_equal_approx(current->get_clearcoat_roughness(), source->get_clearcoat_roughness()))) {
+		return true;
+	}
+
+	return false;
+}
+
+Ref<Material> get_effective_surface_material(MeshInstance3D *p_mesh_instance, const Ref<ArrayMesh> &p_mesh, int p_surface_index) {
+	ERR_FAIL_NULL_V(p_mesh_instance, Ref<Material>());
+	Ref<Material> material = p_mesh_instance->get_material_override();
+	if (material.is_valid()) {
+		return material;
+	}
+	if (p_mesh.is_valid() && p_surface_index >= 0 && p_surface_index < p_mesh->get_surface_count()) {
+		return p_mesh->surface_get_material(p_surface_index);
+	}
+	return Ref<Material>();
+}
+
+String get_surface_material_path(const Ref<Material> &p_material) {
+	if (p_material.is_null()) {
+		return String();
+	}
+	return get_usd_metadata(p_material.ptr()).get("usd:material_path", String());
+}
+
+Dictionary get_surface_description(const Array &p_descriptions, int p_surface_index) {
+	if (p_surface_index < 0 || p_surface_index >= p_descriptions.size() || p_descriptions[p_surface_index].get_type() != Variant::DICTIONARY) {
+		return Dictionary();
+	}
+	return p_descriptions[p_surface_index];
+}
+
+void append_mesh_array_unsupported_warning(const String &p_prim_path, int p_surface_index, const String &p_kind, PackedStringArray *r_warnings) {
+	append_static_save_warning(r_warnings, vformat("%s changed at %s surface %d; source-aware static save currently only merges point positions", p_kind, p_prim_path, p_surface_index));
+}
+
+void warn_unsupported_static_mesh_edits(Node *p_node, const UsdStageRefPtr &p_stage, PackedStringArray *r_warnings) {
+	ERR_FAIL_NULL(p_node);
+	ERR_FAIL_COND(p_stage == nullptr);
+
+	if (MeshInstance3D *mesh_instance = Object::cast_to<MeshInstance3D>(p_node)) {
+		const Dictionary metadata = get_usd_metadata(mesh_instance);
+		const String prim_path = metadata.get("usd:prim_path", String());
+		Ref<ArrayMesh> current_mesh = mesh_instance->get_mesh();
+		if (!prim_path.is_empty() && current_mesh.is_valid()) {
+			UsdGeomMesh usd_mesh(p_stage->GetPrimAtPath(SdfPath(prim_path.utf8().get_data())));
+			if (usd_mesh) {
+				Dictionary source_mapping_notes;
+				const MeshBuildResult source_result = build_polygon_mesh(p_stage, UsdTimeCode::Default(), usd_mesh, &source_mapping_notes);
+				Ref<ArrayMesh> source_mesh = source_result.mesh;
+				if (source_mesh.is_valid()) {
+					if (current_mesh->get_surface_count() != source_mesh->get_surface_count()) {
+						append_static_save_warning(r_warnings, vformat("mesh surface topology changed at %s: source had %d surfaces but edited mesh has %d", prim_path, source_mesh->get_surface_count(), current_mesh->get_surface_count()));
+					}
+
+					const int surface_count = MIN(current_mesh->get_surface_count(), source_mesh->get_surface_count());
+					for (int surface_index = 0; surface_index < surface_count; surface_index++) {
+						const Array current_arrays = current_mesh->surface_get_arrays(surface_index);
+						const Array source_arrays = source_mesh->surface_get_arrays(surface_index);
+						if (current_arrays.size() != Mesh::ARRAY_MAX || source_arrays.size() != Mesh::ARRAY_MAX) {
+							continue;
+						}
+
+						const PackedInt32Array current_indices = current_arrays[Mesh::ARRAY_INDEX];
+						const PackedInt32Array source_indices = source_arrays[Mesh::ARRAY_INDEX];
+						if (!packed_int32_arrays_equal(current_indices, source_indices)) {
+							append_mesh_array_unsupported_warning(prim_path, surface_index, "mesh index buffer", r_warnings);
+						}
+
+						const PackedVector3Array current_normals = current_arrays[Mesh::ARRAY_NORMAL];
+						const PackedVector3Array source_normals = source_arrays[Mesh::ARRAY_NORMAL];
+						if (!packed_vector3_arrays_equal_approx(current_normals, source_normals)) {
+							append_mesh_array_unsupported_warning(prim_path, surface_index, "mesh normal primvar", r_warnings);
+						}
+
+						const PackedVector2Array current_uvs = current_arrays[Mesh::ARRAY_TEX_UV];
+						const PackedVector2Array source_uvs = source_arrays[Mesh::ARRAY_TEX_UV];
+						if (!packed_vector2_arrays_equal_approx(current_uvs, source_uvs)) {
+							append_mesh_array_unsupported_warning(prim_path, surface_index, "mesh UV primvar", r_warnings);
+						}
+
+						const PackedColorArray current_colors = current_arrays[Mesh::ARRAY_COLOR];
+						const PackedColorArray source_colors = source_arrays[Mesh::ARRAY_COLOR];
+						if (!packed_color_arrays_equal_approx(current_colors, source_colors)) {
+							append_mesh_array_unsupported_warning(prim_path, surface_index, "mesh displayColor primvar", r_warnings);
+						}
+
+						const Dictionary source_description = get_surface_description(source_result.material_subsets, surface_index);
+						const String source_material_path = source_description.get("material_path", String());
+						const Ref<Material> current_material = get_effective_surface_material(mesh_instance, current_mesh, surface_index);
+						const Ref<Material> source_material = source_mesh->surface_get_material(surface_index);
+						const String current_material_path = get_surface_material_path(current_material);
+						if (!source_material_path.is_empty() && (current_material.is_null() || current_material_path != source_material_path)) {
+							append_static_save_warning(r_warnings, vformat("material subset rebinding changed at %s surface %d; source-aware static save currently preserves authored subset bindings", prim_path, surface_index));
+						}
+						if (texture_network_material_differs(current_material, source_material)) {
+							append_static_save_warning(r_warnings, vformat("texture-network material edit changed at %s surface %d; source-aware static save currently preserves authored texture networks", prim_path, surface_index));
+						}
+					}
+				}
+			}
+		}
+	}
+
+	for (int i = 0; i < p_node->get_child_count(false); i++) {
+		warn_unsupported_static_mesh_edits(p_node->get_child(i, false), p_stage, r_warnings);
+	}
+}
+
 bool apply_material_edits_to_stage(Node *p_node, const UsdStageRefPtr &p_stage, PackedStringArray *r_warnings) {
 	ERR_FAIL_NULL_V(p_node, false);
 	ERR_FAIL_COND_V(!p_stage, false);
@@ -844,7 +1097,7 @@ bool apply_mesh_point_edits_to_stage(Node *p_node, const UsdStageRefPtr &p_stage
 	return applied_any;
 }
 
-bool apply_animation_edits_to_stage(Node *p_node, const UsdStageRefPtr &p_stage) {
+bool apply_animation_edits_to_stage(Node *p_node, const UsdStageRefPtr &p_stage, PackedStringArray *r_warnings) {
 	ERR_FAIL_NULL_V(p_node, false);
 	ERR_FAIL_COND_V(!p_stage, false);
 
@@ -860,7 +1113,7 @@ bool apply_animation_edits_to_stage(Node *p_node, const UsdStageRefPtr &p_stage)
 			const Dictionary metadata = get_usd_metadata(animation.ptr());
 			const String animation_prim_path = metadata.get("usd:animation_prim_path", String());
 			const Array joint_paths = metadata.get("usd:joint_paths", Array());
-			if (animation_prim_path.is_empty() || joint_paths.is_empty()) {
+			if (animation_prim_path.is_empty()) {
 				continue;
 			}
 
@@ -885,8 +1138,22 @@ bool apply_animation_edits_to_stage(Node *p_node, const UsdStageRefPtr &p_stage)
 
 			const double time_codes_per_second = MAX((double)metadata.get("usd:time_codes_per_second", p_stage->GetTimeCodesPerSecond()), 1.0);
 			const double start_time = (double)metadata.get("usd:start_time_code", 0.0);
+			bool has_derived_inbetween_blend_shape_tracks = false;
+			for (int track_index = 0; track_index < animation->get_track_count(); track_index++) {
+				if (animation->track_get_type(track_index) != Animation::TYPE_BLEND_SHAPE) {
+					continue;
+				}
+				const String blend_shape_name = node_path_property_name(animation->track_get_path(track_index));
+				if (blend_shape_name.contains("__inbetween__")) {
+					has_derived_inbetween_blend_shape_tracks = true;
+					append_static_save_warning(r_warnings, vformat("derived inbetween blend-shape track at %s:%s is unsupported; source-aware static save currently only merges direct primary blend-shape weights", animation_prim_path, blend_shape_name));
+				}
+			}
 			for (int track_index = 0; track_index < animation->get_track_count(); track_index++) {
 				if (animation->track_get_type(track_index) == Animation::TYPE_BLEND_SHAPE) {
+					if (has_derived_inbetween_blend_shape_tracks) {
+						continue;
+					}
 					const Array blend_shape_names = metadata.get("usd:blend_shape_names", Array());
 					const String blend_shape_name = node_path_property_name(animation->track_get_path(track_index));
 					int blend_shape_index = -1;
@@ -971,7 +1238,7 @@ bool apply_animation_edits_to_stage(Node *p_node, const UsdStageRefPtr &p_stage)
 	}
 
 	for (int i = 0; i < p_node->get_child_count(false); i++) {
-		applied_any = apply_animation_edits_to_stage(p_node->get_child(i, false), p_stage) || applied_any;
+		applied_any = apply_animation_edits_to_stage(p_node->get_child(i, false), p_stage, r_warnings) || applied_any;
 	}
 
 	return applied_any;
@@ -988,14 +1255,19 @@ Error save_static_imported_data_to_source_copy(Node *p_root, const String &p_sou
 
 	UsdStageRefPtr stage = UsdStage::Open(root_layer);
 	ERR_FAIL_COND_V_MSG(!stage, ERR_CANT_OPEN, vformat("Failed to compose copied USD layer for source-aware static save: %s", p_destination_absolute_path));
+	UsdStageRefPtr source_stage = UsdStage::Open(p_source_absolute_path.utf8().get_data());
+	if (!source_stage) {
+		source_stage = stage;
+	}
 
 	stage->SetEditTarget(root_layer);
 	PackedStringArray unsupported_warnings;
+	warn_unsupported_static_mesh_edits(p_root, source_stage, &unsupported_warnings);
 	const bool applied_transform_edits = apply_node3d_transform_edits_to_stage(p_root, stage);
 	const bool applied_material_edits = apply_material_edits_to_stage(p_root, stage, &unsupported_warnings);
 	const bool applied_mesh_point_edits = apply_mesh_point_edits_to_stage(p_root, stage, &unsupported_warnings);
 	const bool applied_skeleton_edits = apply_skeleton_rest_edits_to_stage(p_root, stage);
-	const bool applied_animation_edits = apply_animation_edits_to_stage(p_root, stage);
+	const bool applied_animation_edits = apply_animation_edits_to_stage(p_root, stage, &unsupported_warnings);
 	for (int i = 0; i < unsupported_warnings.size(); i++) {
 		UtilityFunctions::push_warning(vformat("USD source-aware static save could not merge unsupported edit: %s", unsupported_warnings[i]));
 	}
