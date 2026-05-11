@@ -4,6 +4,8 @@ A GDExtension that brings [Pixar's OpenUSD](https://openusd.org/) into Godot. It
 project read `.usd`, `.usda`, `.usdc`, and `.usdz` files and use them either as live USD stages
 inside a scene or as a one-shot import that bakes a USD asset into a regular Godot scene.
 
+<video src="media/UsdImport.mov" controls width="100%"></video>
+
 ## What This Module Does
 
 The extension plugs three things into the engine:
@@ -67,7 +69,8 @@ Stage and composition
    files start appearing as scene assets in the filesystem dock.
 
 The extension targets `compatibility_minimum = "4.3"`. The local validated stack is Godot
-4.7.dev (`181b24ba2`) with `godot-cpp` at `6388e26` and OpenUSD 24.11 (`PXR_VERSION 2608`).
+4.7.dev (`181b24ba2`) with `godot-cpp` at `6388e26`, OpenUSD 24.11
+(`PXR_VERSION 2608`), and TBB 2022.3.0.
 Currently shipped binaries target `macos.arm64`; other platforms need a local build.
 
 ## Two Ways to Use a USD Asset
@@ -157,16 +160,43 @@ corrupt downstream USD pipelines.
 
 ## Building from Source
 
+This is a GDExtension build, so SCons needs access to three external SDKs:
+
+- **godot-cpp**: a checkout of the Godot C++ bindings that matches the Godot version you are
+  targeting. Set `GODOT_CPP_PATH` or pass `godot_cpp_path=/path/to/godot-cpp`.
+- **OpenUSD**: an installed OpenUSD SDK prefix containing `include/` and `lib/`. Set
+  `USD_SDK_PATH` or pass `usd_sdk_path=/path/to/usd/install`. The build links against the USD
+  core, geometry, shade, skeleton, lux, and USDZ utility libraries.
+- **TBB**: Intel/oneTBB headers and libraries used by OpenUSD. The build links `libtbb`, so
+  the TBB library must be discoverable by the linker. Set `TBB_SDK_PATH` or pass
+  `tbb_sdk_path=/path/to/tbb`. On Apple Silicon with Homebrew this is commonly
+  `/opt/homebrew/opt/tbb`.
+
+The local validated stack is Godot 4.7.dev (`181b24ba2`), `godot-cpp` `6388e26`, and
+OpenUSD 24.11 (`PXR_VERSION 2608`) with TBB 2022.3.0.
+
 ```bash
 cd godot-usd
 scons platform=macos target=template_debug arch=arm64
 scons platform=macos target=template_release arch=arm64
 ```
 
-Common overrides:
+You can provide dependency paths either as environment variables:
 
 ```bash
-scons godot_cpp_path=/path/to/godot-cpp usd_sdk_path=/path/to/usd/install
+export GODOT_CPP_PATH=/path/to/godot-cpp
+export USD_SDK_PATH=/path/to/usd/install
+export TBB_SDK_PATH=/path/to/tbb
+scons platform=macos target=template_debug arch=arm64
+```
+
+Or as SCons overrides:
+
+```bash
+scons platform=macos target=template_debug arch=arm64 \
+  godot_cpp_path=/path/to/godot-cpp \
+  usd_sdk_path=/path/to/usd/install \
+  tbb_sdk_path=/path/to/tbb
 ```
 
 Open `godot-usd/project` in Godot after building. The extension manifest is
