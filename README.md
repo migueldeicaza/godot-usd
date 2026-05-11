@@ -4,7 +4,7 @@ A GDExtension that brings [Pixar's OpenUSD](https://openusd.org/) into Godot. It
 project read `.usd`, `.usda`, `.usdc`, and `.usdz` files and use them either as live USD stages
 inside a scene or as a one-shot import that bakes a USD asset into a regular Godot scene.
 
-<video src="media/UsdImport.mov" controls width="100%"></video>
+https://github.com/user-attachments/assets/1a2621ea-42ac-4c43-bd41-304dec1ab618
 
 ## What This Module Does
 
